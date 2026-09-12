@@ -1,0 +1,84 @@
+{
+  "entities": {
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "User business workspace data containing profiles, products, sales, expenses, and configurations",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the workspace owner"
+        },
+        "profile": {
+          "type": "object",
+          "description": "Business profile settings and currency"
+        },
+        "products": {
+          "type": "array",
+          "description": "List of products registered in the business"
+        },
+        "sales": {
+          "type": "array",
+          "description": "List of sales transactions recorded"
+        },
+        "expenses": {
+          "type": "array",
+          "description": "List of expenses recorded"
+        },
+        "purchases": {
+          "type": "array",
+          "description": "List of inventory purchase orders"
+        },
+        "income": {
+          "type": "array",
+          "description": "List of other income entries"
+        },
+        "customers": {
+          "type": "array",
+          "description": "List of business customers and debtor records"
+        },
+        "suppliers": {
+          "type": "array",
+          "description": "List of suppliers and creditor balances"
+        },
+        "lastSyncedAt": {
+          "type": "string",
+          "description": "ISO timestamp of the most recent sync"
+        }
+      },
+      "required": ["userId", "profile"]
+    },
+    "BusinessActivityLogEntry": {
+      "title": "BusinessActivityLogEntry",
+      "description": "Chronological audit and activity event for sales, expenses, waste, and payments",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "workspaceId": { "type": "string" },
+        "type": { "type": "string", "enum": ["sale", "waste", "expense", "debt", "production", "purchase"] },
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "amount": { "type": "number" },
+        "quantity": { "type": "number" },
+        "customerName": { "type": "string" },
+        "productName": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["workspaceId", "type", "title", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserWorkspace"
+      },
+      "description": "Isolated workspace document accessible only by the authenticated owner"
+    },
+    "/users/{userId}/activity_log/{activityId}": {
+      "schema": {
+        "$ref": "#/entities/BusinessActivityLogEntry"
+      },
+      "description": "Live chronological activity stream for this business workspace"
+    }
+  }
+}

@@ -1,0 +1,335 @@
+import {
+  BusinessProfile,
+  Product,
+  Sale,
+  Expense,
+  Customer,
+  Supplier,
+  TimelineEvent,
+  NotificationItem,
+  BusinessGoals,
+  ProductionLog,
+  WasteLog,
+  CustomerReturn,
+  SupplierReturn,
+  OtherIncome,
+  Purchase,
+  CashRegisterShift
+} from '../types';
+
+import {
+  initialBusinessProfile,
+  initialProducts,
+  initialSales,
+  initialExpenses,
+  initialCustomers,
+  initialSuppliers,
+  initialTimelineEvents,
+  initialNotifications,
+  initialGoals,
+  initialProductionLogs,
+  initialWasteLogs,
+  initialPurchases
+} from '../data/initialData';
+
+function getKey(base: string, userId?: string): string {
+  return userId ? `smartledger_${userId}_${base}` : `smartledger_${base}`;
+}
+
+export function getStoredProfile(userId?: string): BusinessProfile | null {
+  const key = getKey('profile', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try {
+      return JSON.parse(saved);
+    } catch {
+      // fallback
+    }
+  }
+  return initialBusinessProfile;
+}
+
+export function saveStoredProfile(profile: BusinessProfile, userId?: string) {
+  const key = getKey('profile', userId || profile.userId);
+  localStorage.setItem(key, JSON.stringify(profile));
+}
+
+export function getStoredProducts(userId?: string): Product[] {
+  const key = getKey('products', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialProducts;
+}
+
+export function saveStoredProducts(products: Product[], userId?: string) {
+  const key = getKey('products', userId);
+  localStorage.setItem(key, JSON.stringify(products));
+}
+
+export function getStoredSales(userId?: string): Sale[] {
+  const key = getKey('sales', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialSales;
+}
+
+export function saveStoredSales(sales: Sale[], userId?: string) {
+  const key = getKey('sales', userId);
+  localStorage.setItem(key, JSON.stringify(sales));
+}
+
+export function getStoredExpenses(userId?: string): Expense[] {
+  const key = getKey('expenses', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialExpenses;
+}
+
+export function saveStoredExpenses(expenses: Expense[], userId?: string) {
+  const key = getKey('expenses', userId);
+  localStorage.setItem(key, JSON.stringify(expenses));
+}
+
+export function getStoredPurchases(userId?: string): Purchase[] {
+  const key = getKey('purchases', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialPurchases;
+}
+
+export function saveStoredPurchases(purchases: Purchase[], userId?: string) {
+  const key = getKey('purchases', userId);
+  localStorage.setItem(key, JSON.stringify(purchases));
+}
+
+export function getStoredCustomers(userId?: string): Customer[] {
+  const key = getKey('customers', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialCustomers;
+}
+
+export function saveStoredCustomers(customers: Customer[], userId?: string) {
+  const key = getKey('customers', userId);
+  localStorage.setItem(key, JSON.stringify(customers));
+}
+
+export function getStoredSuppliers(userId?: string): Supplier[] {
+  const key = getKey('suppliers', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialSuppliers;
+}
+
+export function saveStoredSuppliers(suppliers: Supplier[], userId?: string) {
+  const key = getKey('suppliers', userId);
+  localStorage.setItem(key, JSON.stringify(suppliers));
+}
+
+export function getStoredTimeline(userId?: string): TimelineEvent[] {
+  const key = getKey('timeline', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialTimelineEvents;
+}
+
+export function saveStoredTimeline(events: TimelineEvent[], userId?: string) {
+  const key = getKey('timeline', userId);
+  localStorage.setItem(key, JSON.stringify(events));
+}
+
+export function getStoredNotifications(userId?: string): NotificationItem[] {
+  const key = getKey('notifications', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialNotifications;
+}
+
+export function saveStoredNotifications(notifs: NotificationItem[], userId?: string) {
+  const key = getKey('notifications', userId);
+  localStorage.setItem(key, JSON.stringify(notifs));
+}
+
+export function getStoredGoals(userId?: string): BusinessGoals {
+  const key = getKey('goals', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialGoals;
+}
+
+export function saveStoredGoals(goals: BusinessGoals, userId?: string) {
+  const key = getKey('goals', userId);
+  localStorage.setItem(key, JSON.stringify(goals));
+}
+
+export function getStoredProduction(userId?: string): ProductionLog[] {
+  const key = getKey('production', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialProductionLogs;
+}
+
+export function saveStoredProduction(logs: ProductionLog[], userId?: string) {
+  const key = getKey('production', userId);
+  localStorage.setItem(key, JSON.stringify(logs));
+}
+
+export function getStoredWaste(userId?: string): WasteLog[] {
+  const key = getKey('waste', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return initialWasteLogs;
+}
+
+export function saveStoredWaste(logs: WasteLog[], userId?: string) {
+  const key = getKey('waste', userId);
+  localStorage.setItem(key, JSON.stringify(logs));
+}
+
+export function getStoredCustomerReturns(userId?: string): CustomerReturn[] {
+  const key = getKey('cust_returns', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return [];
+}
+
+export function saveStoredCustomerReturns(returns: CustomerReturn[], userId?: string) {
+  const key = getKey('cust_returns', userId);
+  localStorage.setItem(key, JSON.stringify(returns));
+}
+
+export function getStoredSupplierReturns(userId?: string): SupplierReturn[] {
+  const key = getKey('supp_returns', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return [];
+}
+
+export function saveStoredSupplierReturns(returns: SupplierReturn[], userId?: string) {
+  const key = getKey('supp_returns', userId);
+  localStorage.setItem(key, JSON.stringify(returns));
+}
+
+export function getStoredShifts(userId?: string): CashRegisterShift[] {
+  const key = getKey('shifts', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return [];
+}
+
+export function saveStoredShifts(shifts: CashRegisterShift[], userId?: string) {
+  const key = getKey('shifts', userId);
+  localStorage.setItem(key, JSON.stringify(shifts));
+}
+
+export function getStoredOtherIncome(userId?: string): OtherIncome[] {
+  const key = getKey('income', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return [];
+}
+
+export function saveStoredOtherIncome(incomes: OtherIncome[], userId?: string) {
+  const key = getKey('income', userId);
+  localStorage.setItem(key, JSON.stringify(incomes));
+}
+
+export function getStoredCashBase(userId?: string): number {
+  const key = getKey('cash_start', userId);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    return Number(saved) || 0;
+  }
+  return 0;
+}
+
+export function saveStoredCashBase(amount: number, userId?: string) {
+  const key = getKey('cash_start', userId);
+  localStorage.setItem(key, String(amount));
+}
+
+export const storage = {
+  getProfile: getStoredProfile,
+  saveProfile: saveStoredProfile,
+  getProducts: getStoredProducts,
+  saveProducts: saveStoredProducts,
+  getSales: getStoredSales,
+  saveSales: saveStoredSales,
+  getExpenses: getStoredExpenses,
+  saveExpenses: saveStoredExpenses,
+  getPurchases: getStoredPurchases,
+  savePurchases: saveStoredPurchases,
+  getCustomers: getStoredCustomers,
+  saveCustomers: saveStoredCustomers,
+  getSuppliers: getStoredSuppliers,
+  saveSuppliers: saveStoredSuppliers,
+  getProductionLogs: getStoredProduction,
+  saveProductionLogs: saveStoredProduction,
+  getWasteLogs: getStoredWaste,
+  saveWasteLogs: saveStoredWaste,
+  getOtherIncomes: getStoredOtherIncome,
+  saveOtherIncomes: saveStoredOtherIncome,
+  getCashBase: getStoredCashBase,
+  saveCashBase: saveStoredCashBase,
+  clearAll: () => localStorage.clear(),
+};
+
+export function userScopedStorage(userId: string) {
+  return {
+    getProfile: () => getStoredProfile(userId),
+    saveProfile: (profile: BusinessProfile) => saveStoredProfile(profile, userId),
+    getProducts: () => getStoredProducts(userId),
+    saveProducts: (products: Product[]) => saveStoredProducts(products, userId),
+    getSales: () => getStoredSales(userId),
+    saveSales: (sales: Sale[]) => saveStoredSales(sales, userId),
+    getExpenses: () => getStoredExpenses(userId),
+    saveExpenses: (expenses: Expense[]) => saveStoredExpenses(expenses, userId),
+    getPurchases: () => getStoredPurchases(userId),
+    savePurchases: (purchases: Purchase[]) => saveStoredPurchases(purchases, userId),
+    getCustomers: () => getStoredCustomers(userId),
+    saveCustomers: (customers: Customer[]) => saveStoredCustomers(customers, userId),
+    getSuppliers: () => getStoredSuppliers(userId),
+    saveSuppliers: (suppliers: Supplier[]) => saveStoredSuppliers(suppliers, userId),
+    getProductionLogs: () => getStoredProduction(userId),
+    saveProductionLogs: (logs: ProductionLog[]) => saveStoredProduction(logs, userId),
+    getWasteLogs: () => getStoredWaste(userId),
+    saveWasteLogs: (logs: WasteLog[]) => saveStoredWaste(logs, userId),
+    getOtherIncomes: () => getStoredOtherIncome(userId),
+    saveOtherIncomes: (incomes: OtherIncome[]) => saveStoredOtherIncome(incomes, userId),
+    getCustomerReturns: () => getStoredCustomerReturns(userId),
+    saveCustomerReturns: (returns: CustomerReturn[]) => saveStoredCustomerReturns(returns, userId),
+    getShifts: () => getStoredShifts(userId),
+    saveShifts: (shifts: CashRegisterShift[]) => saveStoredShifts(shifts, userId),
+  };
+}
+

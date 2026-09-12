@@ -1,0 +1,6 @@
+{
+  "name": "SmartLedger",
+  "description": "SmartLedger — Your Business. Made Simple. Run your business without complicated accounting.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
