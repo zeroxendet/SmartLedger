@@ -14,7 +14,8 @@ import {
   SupplierReturn,
   OtherIncome,
   Purchase,
-  CashRegisterShift
+  CashRegisterShift,
+  ArchivedBusinessPeriod
 } from '../types';
 
 import {
@@ -37,42 +38,109 @@ function getKey(base: string, userId?: string): string {
 }
 
 export function getStoredProfile(userId?: string): BusinessProfile | null {
-  const key = getKey('profile', userId);
-  const saved = localStorage.getItem(key);
-  if (saved) {
-    try {
-      return JSON.parse(saved);
-    } catch {
-      // fallback
+  if (userId) {
+    const userKey = getKey('profile', userId);
+    const saved = localStorage.getItem(userKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.name) return parsed;
+      } catch {}
     }
   }
+
+  // Resilient fallback: check general/previous profile
+  const globalSaved = localStorage.getItem('smartledger_profile');
+  if (globalSaved) {
+    try {
+      const parsed = JSON.parse(globalSaved);
+      if (parsed && parsed.name) {
+        if (userId) {
+          localStorage.setItem(getKey('profile', userId), globalSaved);
+        }
+        return parsed;
+      }
+    } catch {}
+  }
+
   return initialBusinessProfile;
 }
 
 export function saveStoredProfile(profile: BusinessProfile, userId?: string) {
-  const key = getKey('profile', userId || profile.userId);
-  localStorage.setItem(key, JSON.stringify(profile));
+  const targetId = userId || profile.userId;
+  if (targetId) {
+    const key = getKey('profile', targetId);
+    localStorage.setItem(key, JSON.stringify(profile));
+  }
+  localStorage.setItem('smartledger_profile', JSON.stringify(profile));
 }
 
 export function getStoredProducts(userId?: string): Product[] {
-  const key = getKey('products', userId);
-  const saved = localStorage.getItem(key);
-  if (saved) {
-    try { return JSON.parse(saved); } catch {}
+  // 1. Check user-scoped key if provided
+  if (userId) {
+    const key = getKey('products', userId);
+    const saved = localStorage.getItem(key);
+    if (saved !== null) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      } catch {}
+    }
   }
+
+  // 2. Check global/fallback products key
+  const globalSaved = localStorage.getItem('smartledger_products');
+  if (globalSaved !== null) {
+    try {
+      const parsed = JSON.parse(globalSaved);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        if (userId) {
+          localStorage.setItem(getKey('products', userId), globalSaved);
+        }
+        return parsed;
+      }
+    } catch {}
+  }
+
+  // 3. Check last known products backup
+  const backupSaved = localStorage.getItem('smartledger_last_known_products');
+  if (backupSaved !== null) {
+    try {
+      const parsed = JSON.parse(backupSaved);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        if (userId) {
+          localStorage.setItem(getKey('products', userId), backupSaved);
+        }
+        return parsed;
+      }
+    } catch {}
+  }
+
   return initialProducts;
 }
 
 export function saveStoredProducts(products: Product[], userId?: string) {
-  const key = getKey('products', userId);
-  localStorage.setItem(key, JSON.stringify(products));
+  if (userId) {
+    const key = getKey('products', userId);
+    localStorage.setItem(key, JSON.stringify(products));
+  }
+  // If products are populated, keep global and backup cache fresh
+  if (Array.isArray(products) && products.length > 0) {
+    localStorage.setItem('smartledger_products', JSON.stringify(products));
+    localStorage.setItem('smartledger_last_known_products', JSON.stringify(products));
+  }
 }
 
 export function getStoredSales(userId?: string): Sale[] {
   const key = getKey('sales', userId);
   const saved = localStorage.getItem(key);
-  if (saved) {
+  if (saved !== null) {
     try { return JSON.parse(saved); } catch {}
+  }
+  if (userId && localStorage.getItem(getKey('profile', userId))) {
+    return [];
   }
   return initialSales;
 }
@@ -85,8 +153,11 @@ export function saveStoredSales(sales: Sale[], userId?: string) {
 export function getStoredExpenses(userId?: string): Expense[] {
   const key = getKey('expenses', userId);
   const saved = localStorage.getItem(key);
-  if (saved) {
+  if (saved !== null) {
     try { return JSON.parse(saved); } catch {}
+  }
+  if (userId && localStorage.getItem(getKey('profile', userId))) {
+    return [];
   }
   return initialExpenses;
 }
@@ -99,8 +170,11 @@ export function saveStoredExpenses(expenses: Expense[], userId?: string) {
 export function getStoredPurchases(userId?: string): Purchase[] {
   const key = getKey('purchases', userId);
   const saved = localStorage.getItem(key);
-  if (saved) {
+  if (saved !== null) {
     try { return JSON.parse(saved); } catch {}
+  }
+  if (userId && localStorage.getItem(getKey('profile', userId))) {
+    return [];
   }
   return initialPurchases;
 }
@@ -113,8 +187,11 @@ export function saveStoredPurchases(purchases: Purchase[], userId?: string) {
 export function getStoredCustomers(userId?: string): Customer[] {
   const key = getKey('customers', userId);
   const saved = localStorage.getItem(key);
-  if (saved) {
+  if (saved !== null) {
     try { return JSON.parse(saved); } catch {}
+  }
+  if (userId && localStorage.getItem(getKey('profile', userId))) {
+    return [];
   }
   return initialCustomers;
 }
@@ -127,8 +204,11 @@ export function saveStoredCustomers(customers: Customer[], userId?: string) {
 export function getStoredSuppliers(userId?: string): Supplier[] {
   const key = getKey('suppliers', userId);
   const saved = localStorage.getItem(key);
-  if (saved) {
+  if (saved !== null) {
     try { return JSON.parse(saved); } catch {}
+  }
+  if (userId && localStorage.getItem(getKey('profile', userId))) {
+    return [];
   }
   return initialSuppliers;
 }
@@ -278,6 +358,20 @@ export function saveStoredCashBase(amount: number, userId?: string) {
   localStorage.setItem(key, String(amount));
 }
 
+export function getStoredArchivedPeriods(userId?: string): ArchivedBusinessPeriod[] {
+  const key = getKey('archived_periods', userId);
+  const saved = localStorage.getItem(key);
+  if (saved !== null) {
+    try { return JSON.parse(saved); } catch {}
+  }
+  return [];
+}
+
+export function saveStoredArchivedPeriods(periods: ArchivedBusinessPeriod[], userId?: string) {
+  const key = getKey('archived_periods', userId);
+  localStorage.setItem(key, JSON.stringify(periods));
+}
+
 export const storage = {
   getProfile: getStoredProfile,
   saveProfile: saveStoredProfile,
@@ -301,6 +395,8 @@ export const storage = {
   saveOtherIncomes: saveStoredOtherIncome,
   getCashBase: getStoredCashBase,
   saveCashBase: saveStoredCashBase,
+  getArchivedPeriods: getStoredArchivedPeriods,
+  saveArchivedPeriods: saveStoredArchivedPeriods,
   clearAll: () => localStorage.clear(),
 };
 
@@ -330,6 +426,10 @@ export function userScopedStorage(userId: string) {
     saveCustomerReturns: (returns: CustomerReturn[]) => saveStoredCustomerReturns(returns, userId),
     getShifts: () => getStoredShifts(userId),
     saveShifts: (shifts: CashRegisterShift[]) => saveStoredShifts(shifts, userId),
+    getArchivedPeriods: () => getStoredArchivedPeriods(userId),
+    saveArchivedPeriods: (periods: ArchivedBusinessPeriod[]) => saveStoredArchivedPeriods(periods, userId),
+    getCashBase: () => getStoredCashBase(userId),
+    saveCashBase: (amount: number) => saveStoredCashBase(amount, userId),
   };
 }
 

@@ -11,7 +11,8 @@ import {
   ProductionLog, 
   WasteLog,
   CustomerReturn,
-  CashRegisterShift
+  CashRegisterShift,
+  ArchivedBusinessPeriod
 } from './types';
 import { SplashScreen } from './components/SplashScreen';
 import { WelcomeScreen } from './components/WelcomeScreen';
@@ -35,7 +36,23 @@ import { ShiftReconciliationModal } from './components/ShiftReconciliationModal'
 import { ReturnsModal } from './components/ReturnsModal';
 import { CashierPinModal } from './components/CashierPinModal';
 import { PurchaseOrderModal } from './components/PurchaseOrderModal';
+import { ShareAppModal } from './components/ShareAppModal';
+import { SettingsModal } from './components/SettingsModal';
+import { RestartBusinessModal } from './components/RestartBusinessModal';
+import { ArchivedPeriodDetailsModal } from './components/ArchivedPeriodDetailsModal';
 import { BottomNavBar } from './components/BottomNavBar';
+import { SessionLockScreen } from './components/SessionLockScreen';
+import { 
+  SESSION_LOCK_TIMEOUT_MINUTES,
+  SESSION_LOCK_TIMEOUT_MS,
+  checkShouldSessionLock,
+  setSessionLockedState,
+  recordBackgroundTimestamp,
+  clearBackgroundTimestamp,
+  recordUserActiveTimestamp,
+  clearSessionLockStorage,
+  STORAGE_KEYS
+} from './utils/sessionLock';
 
 import { 
   LayoutDashboard, 
@@ -55,8 +72,13 @@ import {
   Flame,
   Lock,
   Unlock,
+  KeyRound,
   Clock,
-  RotateCcw
+  RotateCcw,
+  Share2,
+  Settings as SettingsIcon,
+  Archive,
+  ShieldCheck
 } from 'lucide-react';
 import { 
   auth, 
@@ -67,7 +89,12 @@ import {
   fetchUserWorkspaceFromFirestore,
   initializeEmptyUserWorkspace,
   logBusinessActivity,
-  UserWorkspaceData
+  UserWorkspaceData,
+  archiveBusinessPeriodToFirestore,
+  fetchArchivedPeriodsFromFirestore,
+  deleteArchivedPeriodFromFirestore,
+  deleteBusinessActivityLog,
+  deleteBusinessActivityLogsByRelatedId
 } from './firebase';
 import { formatCurrency } from './utils/calculations';
 import { userScopedStorage } from './utils/storage';
@@ -77,8 +104,13 @@ export function App() {
   // Splash screen state (Phase 1)
   const [showSplash, setShowSplash] = useState<boolean>(true);
 
-  // Firebase Auth State
+  // Firebase Auth & Unified User Session State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [activeUserId, setActiveUserId] = useState<string | null>(() => {
+    return localStorage.getItem('smartledger_active_uid') || null;
+  });
+  const effectiveUserId = currentUser?.uid || activeUserId || null;
+
   const { isDevOrOwner } = useDevMode(currentUser?.email);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -130,6 +162,16 @@ export function App() {
   const [isPinModalOpen, setIsPinModalOpen] = useState<boolean>(false);
   const [pinModalMode, setPinModalMode] = useState<'unlock_owner' | 'set_pin'>('unlock_owner');
   const [pendingTabAfterUnlock, setPendingTabAfterUnlock] = useState<'reports' | 'feed' | null>(null);
+  const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
+  const [archivedPeriods, setArchivedPeriods] = useState<ArchivedBusinessPeriod[]>([]);
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isRestartBusinessOpen, setIsRestartBusinessOpen] = useState<boolean>(false);
+  const [selectedArchivedPeriod, setSelectedArchivedPeriod] = useState<ArchivedBusinessPeriod | null>(null);
+
+  // Secure Automatic Session Lock State (5-minute background / idle timeout)
+  const [isSessionLocked, setIsSessionLocked] = useState<boolean>(() => {
+    return checkShouldSessionLock();
+  });
 
   const [cloudSyncStatus, setCloudSyncStatus] = useState<'synced' | 'syncing' | 'offline'>('synced');
 
@@ -138,10 +180,16 @@ export function App() {
 
   const handleContinueOffline = (name = 'Business Owner') => {
     const localId = 'local_user_default';
+    setActiveUserId(localId);
+    localStorage.setItem('smartledger_active_uid', localId);
     const storage = userScopedStorage(localId);
     const existing = storage.getProfile();
     if (existing && existing.name) {
       setProfile(existing);
+      if (existing.cashierPin) {
+        setCashierPin(existing.cashierPin);
+        localStorage.setItem('smartledger_cashier_pin', existing.cashierPin);
+      }
       setProducts(storage.getProducts());
       setSales(storage.getSales());
       setExpenses(storage.getExpenses());
@@ -151,6 +199,7 @@ export function App() {
       setSuppliers(storage.getSuppliers());
       setShifts(storage.getShifts());
       setReturns(storage.getCustomerReturns());
+      setArchivedPeriods(storage.getArchivedPeriods() || []);
       setIsAuthenticated(true);
       setIsWizardOpen(false);
       isInitialLoadComplete.current = true;
@@ -159,25 +208,6 @@ export function App() {
       setIsWizardOpen(true);
     }
   };
-
-  // 1. Listen for Firebase Authentication state changes
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setCurrentUser(user);
-      if (user) {
-        // Authenticated user: load their private Firestore workspace
-        await loadUserData(user);
-      } else {
-        // Logged out: reset all state to zero
-        clearLocalState();
-        setIsAuthenticated(false);
-        setIsWizardOpen(false);
-        setIsAuthLoading(false);
-      }
-    });
-
-    return () => unsubscribe();
-  }, []);
 
   const clearLocalState = () => {
     setProfile(null);
@@ -192,68 +222,160 @@ export function App() {
     setWasteLogs([]);
     setShifts([]);
     setReturns([]);
+    setArchivedPeriods([]);
     isInitialLoadComplete.current = false;
   };
 
-  const loadUserData = async (user: User) => {
+  /**
+   * Load user workspace data by UID with intelligent non-destructive merging:
+   * Local products are NEVER overwritten by an empty Firestore array.
+   */
+  const loadUserDataForUid = async (uid: string, email?: string, displayName?: string) => {
     setIsAuthLoading(true);
     try {
-      const storage = userScopedStorage(user.uid);
+      const storage = userScopedStorage(uid);
 
       // 1. Instant optimistic restore from local device cache for seamless offline operation
       const localProf = storage.getProfile();
+      const localProducts = storage.getProducts() || [];
+      const localSales = storage.getSales() || [];
+      const localExpenses = storage.getExpenses() || [];
+      const localPurchases = storage.getPurchases() || [];
+      const localOtherIncomes = storage.getOtherIncomes() || [];
+      const localCustomers = storage.getCustomers() || [];
+      const localSuppliers = storage.getSuppliers() || [];
+      const localShifts = storage.getShifts() || [];
+      const localReturns = storage.getCustomerReturns() || [];
+      const localProdLogs = storage.getProductionLogs() || [];
+      const localWasteLogs = storage.getWasteLogs() || [];
+      const localArchived = storage.getArchivedPeriods() || [];
+
       if (localProf && localProf.name) {
         setProfile(localProf);
-        setProducts(storage.getProducts());
-        setSales(storage.getSales());
-        setExpenses(storage.getExpenses());
-        setPurchases(storage.getPurchases());
-        setOtherIncomes(storage.getOtherIncomes());
-        setCustomers(storage.getCustomers());
-        setSuppliers(storage.getSuppliers());
-        setShifts(storage.getShifts());
-        setReturns(storage.getCustomerReturns());
+        if (localProf.cashierPin) {
+          setCashierPin(localProf.cashierPin);
+          localStorage.setItem('smartledger_cashier_pin', localProf.cashierPin);
+        }
+        setProducts(localProducts);
+        setSales(localSales);
+        setExpenses(localExpenses);
+        setPurchases(localPurchases);
+        setOtherIncomes(localOtherIncomes);
+        setCustomers(localCustomers);
+        setSuppliers(localSuppliers);
+        setShifts(localShifts);
+        setReturns(localReturns);
+        setProductionLogs(localProdLogs);
+        setWasteLogs(localWasteLogs);
+        setArchivedPeriods(localArchived);
         setIsAuthenticated(true);
         setIsWizardOpen(false);
       }
 
       // 2. Fetch latest data from Firestore
-      const res = await fetchUserWorkspaceFromFirestore(user.uid);
+      const res = await fetchUserWorkspaceFromFirestore(uid);
 
       if (res.success && res.data && res.data.profile) {
-        // Existing user with configured business in Firestore
         const ws = res.data;
         setProfile(ws.profile);
-        setProducts(ws.products || []);
-        setSales(ws.sales || []);
-        setExpenses(ws.expenses || []);
-        setPurchases(ws.purchases || []);
-        setOtherIncomes(ws.income || []);
-        setCustomers(ws.customers || []);
-        setSuppliers(ws.suppliers || []);
-        setProductionLogs(ws.productionLogs || []);
-        setWasteLogs(ws.wasteLogs || []);
+        if (ws.profile.cashierPin) {
+          setCashierPin(ws.profile.cashierPin);
+          localStorage.setItem('smartledger_cashier_pin', ws.profile.cashierPin);
+        }
 
-        // Cache locally for offline resilience
+        // INTELLIGENT MERGE FOR PRODUCTS:
+        // Do not let an empty or outdated Firestore document wipe out products saved locally!
+        let finalProducts = ws.products || [];
+        if (finalProducts.length === 0 && localProducts.length > 0) {
+          finalProducts = localProducts;
+          // Sync local products back to Firestore
+          saveUserWorkspaceToFirestore(uid, { products: localProducts }).catch(() => {});
+        } else if (localProducts.length > 0) {
+          // Merge by product ID, preserving all unique products from both sources
+          const prodMap = new Map<string, Product>();
+          finalProducts.forEach((p) => prodMap.set(p.id, p));
+          localProducts.forEach((p) => {
+            if (!prodMap.has(p.id)) {
+              prodMap.set(p.id, p);
+            }
+          });
+          finalProducts = Array.from(prodMap.values());
+        }
+
+        setProducts(finalProducts);
+        storage.saveProducts(finalProducts);
+
+        // Safe merge for sales, expenses, customers, suppliers
+        const finalSales = (ws.sales && ws.sales.length > 0) ? ws.sales : localSales;
+        setSales(finalSales);
+        storage.saveSales(finalSales);
+
+        const finalExpenses = (ws.expenses && ws.expenses.length > 0) ? ws.expenses : localExpenses;
+        setExpenses(finalExpenses);
+        storage.saveExpenses(finalExpenses);
+
+        const finalPurchases = (ws.purchases && ws.purchases.length > 0) ? ws.purchases : localPurchases;
+        setPurchases(finalPurchases);
+        storage.savePurchases(finalPurchases);
+
+        const finalIncome = (ws.income && ws.income.length > 0) ? ws.income : localOtherIncomes;
+        setOtherIncomes(finalIncome);
+        storage.saveOtherIncomes(finalIncome);
+
+        const finalCustomers = (ws.customers && ws.customers.length > 0) ? ws.customers : localCustomers;
+        setCustomers(finalCustomers);
+        storage.saveCustomers(finalCustomers);
+
+        const finalSuppliers = (ws.suppliers && ws.suppliers.length > 0) ? ws.suppliers : localSuppliers;
+        setSuppliers(finalSuppliers);
+        storage.saveSuppliers(finalSuppliers);
+
+        const finalProdLogs = (ws.productionLogs && ws.productionLogs.length > 0) ? ws.productionLogs : localProdLogs;
+        setProductionLogs(finalProdLogs);
+        storage.saveProductionLogs(finalProdLogs);
+
+        const finalWasteLogs = (ws.wasteLogs && ws.wasteLogs.length > 0) ? ws.wasteLogs : localWasteLogs;
+        setWasteLogs(finalWasteLogs);
+        storage.saveWasteLogs(finalWasteLogs);
+
+        // Fetch and merge archived periods
+        try {
+          const archivedRes = await fetchArchivedPeriodsFromFirestore(uid);
+          if (archivedRes.success && archivedRes.data && archivedRes.data.length > 0) {
+            const archMap = new Map<string, ArchivedBusinessPeriod>();
+            archivedRes.data.forEach((p) => archMap.set(p.id, p));
+            localArchived.forEach((p) => {
+              if (!archMap.has(p.id)) archMap.set(p.id, p);
+            });
+            const mergedArchived = Array.from(archMap.values()).sort((a, b) => 
+              new Date(b.archivedAt).getTime() - new Date(a.archivedAt).getTime()
+            );
+            setArchivedPeriods(mergedArchived);
+            storage.saveArchivedPeriods(mergedArchived);
+          } else if (ws.archivedPeriods && ws.archivedPeriods.length > 0) {
+            setArchivedPeriods(ws.archivedPeriods);
+            storage.saveArchivedPeriods(ws.archivedPeriods);
+          }
+        } catch (e) {
+          console.warn('Could not fetch archived periods from Firestore:', e);
+        }
+
         storage.saveProfile(ws.profile);
-        storage.saveProducts(ws.products || []);
-        storage.saveSales(ws.sales || []);
-        storage.saveExpenses(ws.expenses || []);
-        storage.savePurchases(ws.purchases || []);
-        storage.saveOtherIncomes(ws.income || []);
-        storage.saveCustomers(ws.customers || []);
-        storage.saveSuppliers(ws.suppliers || []);
 
         setIsAuthenticated(true);
         setIsWizardOpen(false);
       } else if (!localProf || !localProf.name) {
-        // New account with no business profile yet: open Business Setup Wizard
+        // Truly a new user with no setup anywhere: open Business Setup Wizard
         setWizardUser({
-          name: user.displayName || '',
-          email: user.email || '',
+          name: displayName || '',
+          email: email || '',
         });
         setIsWizardOpen(true);
         setIsAuthenticated(false);
+      } else {
+        // Local profile loaded successfully
+        setIsAuthenticated(true);
+        setIsWizardOpen(false);
       }
     } catch (err) {
       console.error('Error loading user business workspace:', err);
@@ -262,15 +384,47 @@ export function App() {
       // Allow syncing after state is established
       setTimeout(() => {
         isInitialLoadComplete.current = true;
-      }, 500);
+      }, 300);
     }
   };
 
-  // 2. Sync state changes to user's isolated Cloud Firestore workspace
+  // 1. Listen for Firebase Authentication state changes
   useEffect(() => {
-    if (!currentUser || !profile || !isInitialLoadComplete.current) return;
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        setActiveUserId(user.uid);
+        localStorage.setItem('smartledger_active_uid', user.uid);
+        await loadUserDataForUid(user.uid, user.email || '', user.displayName || '');
+      } else {
+        // Check if there is a persistent active local user session
+        const storedUid = localStorage.getItem('smartledger_active_uid');
+        const storedMetaRaw = localStorage.getItem('smartledger_active_user_meta');
+        if (storedUid && storedMetaRaw) {
+          try {
+            const meta = JSON.parse(storedMetaRaw);
+            setActiveUserId(storedUid);
+            await loadUserDataForUid(storedUid, meta.email, meta.name);
+            return;
+          } catch {}
+        }
+        // Logged out: reset all state to zero
+        clearLocalState();
+        setIsAuthenticated(false);
+        setIsWizardOpen(false);
+        setIsAuthLoading(false);
+      }
+    });
 
-    const storage = userScopedStorage(currentUser.uid);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Sync state changes to user's isolated workspace (Local Storage immediately, Firestore debounced)
+  useEffect(() => {
+    const uid = effectiveUserId;
+    if (!uid || !profile || !isInitialLoadComplete.current) return;
+
+    const storage = userScopedStorage(uid);
     storage.saveProfile(profile);
     storage.saveProducts(products);
     storage.saveSales(sales);
@@ -281,64 +435,218 @@ export function App() {
     storage.saveSuppliers(suppliers);
     storage.saveProductionLogs(productionLogs);
     storage.saveWasteLogs(wasteLogs);
+    storage.saveShifts(shifts);
+    storage.saveCustomerReturns(returns);
 
-    // Debounced Firestore sync
-    const timeoutId = setTimeout(async () => {
-      setCloudSyncStatus('syncing');
-      try {
-        const workspacePayload: Partial<UserWorkspaceData> = {
-          userId: currentUser.uid,
-          profile,
-          business: {
-            name: profile.name,
-            type: profile.type,
-            currency: profile.currency,
-            ownerName: profile.ownerName,
-            phone: profile.phone || '',
-            email: profile.email || currentUser.email || '',
-            address: profile.address || '',
-            logoUrl: profile.logoUrl || '',
-          },
-          products,
-          sales,
-          expenses,
-          purchases,
-          income: otherIncomes,
-          customers,
-          suppliers,
-          productionLogs,
-          wasteLogs,
-          settings: {
-            allowCustomerCredit: profile.allowCustomerCredit,
-            allowSupplierCredit: profile.allowSupplierCredit,
-            beginnerMode: profile.beginnerMode,
-            isBakeryMode: profile.isBakeryMode,
-          },
-        };
+    // Debounced Firestore sync for Firebase-authenticated accounts
+    if (currentUser?.uid) {
+      const timeoutId = setTimeout(async () => {
+        setCloudSyncStatus('syncing');
+        try {
+          const workspacePayload: Partial<UserWorkspaceData> = {
+            userId: currentUser.uid,
+            profile,
+            business: {
+              name: profile.name,
+              type: profile.type,
+              currency: profile.currency,
+              ownerName: profile.ownerName,
+              phone: profile.phone || '',
+              email: profile.email || currentUser.email || '',
+              address: profile.address || '',
+              logoUrl: profile.logoUrl || '',
+            },
+            products,
+            sales,
+            expenses,
+            purchases,
+            income: otherIncomes,
+            customers,
+            suppliers,
+            productionLogs,
+            wasteLogs,
+            settings: {
+              allowCustomerCredit: profile.allowCustomerCredit,
+              allowSupplierCredit: profile.allowSupplierCredit,
+              beginnerMode: profile.beginnerMode,
+              isBakeryMode: profile.isBakeryMode,
+            },
+            lastSyncedAt: new Date().toISOString(),
+          };
 
-        const res = await saveUserWorkspaceToFirestore(currentUser.uid, workspacePayload);
-        if (res.success) {
-          setCloudSyncStatus('synced');
-        } else {
-          setCloudSyncStatus('synced');
+          const res = await saveUserWorkspaceToFirestore(currentUser.uid, workspacePayload);
+          if (res.success) {
+            setCloudSyncStatus('synced');
+          }
+        } catch (err) {
+          console.warn('Firestore autosync warning:', err);
+          setCloudSyncStatus('offline');
         }
-      } catch (err) {
-        console.warn('Firestore autosync warning:', err);
-        setCloudSyncStatus('offline');
-      }
-    }, 1000);
+      }, 800);
 
-    return () => clearTimeout(timeoutId);
-  }, [currentUser, profile, products, sales, expenses, purchases, otherIncomes, customers, suppliers, productionLogs, wasteLogs]);
+      return () => clearTimeout(timeoutId);
+    }
+  }, [effectiveUserId, currentUser, profile, products, sales, expenses, purchases, otherIncomes, customers, suppliers, productionLogs, wasteLogs, shifts, returns]);
+
+  // Sync current user identity & business name to session lock storage for offline/refresh resilience
+  useEffect(() => {
+    if (currentUser?.email) {
+      localStorage.setItem(STORAGE_KEYS.LOCKED_USER_EMAIL, currentUser.email);
+    } else if (profile?.email) {
+      localStorage.setItem(STORAGE_KEYS.LOCKED_USER_EMAIL, profile.email);
+    }
+    if (profile?.name) {
+      localStorage.setItem(STORAGE_KEYS.LOCKED_BUSINESS_NAME, profile.name);
+    }
+    if (profile?.ownerName) {
+      localStorage.setItem(STORAGE_KEYS.LOCKED_USER_NAME, profile.ownerName);
+    } else if (currentUser?.displayName) {
+      localStorage.setItem(STORAGE_KEYS.LOCKED_USER_NAME, currentUser.displayName);
+    }
+  }, [currentUser, profile]);
+
+  // Secure Automatic Session Lock Lifecycle (5-minute background/idle timeout on Mobile & Desktop)
+  useEffect(() => {
+    if (!isAuthenticated || !profile) return;
+
+    // Handle visibility changes (browser tab switch, minimize, switching to other phone apps)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        recordBackgroundTimestamp();
+      } else if (document.visibilityState === 'visible') {
+        if (checkShouldSessionLock()) {
+          setIsSessionLocked(true);
+          setSessionLockedState(true);
+        } else {
+          clearBackgroundTimestamp();
+        }
+      }
+    };
+
+    // Handle window blur & focus
+    const handleWindowBlur = () => {
+      recordBackgroundTimestamp();
+    };
+
+    const handleWindowFocus = () => {
+      if (checkShouldSessionLock()) {
+        setIsSessionLocked(true);
+        setSessionLockedState(true);
+      } else {
+        clearBackgroundTimestamp();
+      }
+    };
+
+    // Mobile specific lifecycle: pagehide & pageshow
+    const handlePageHide = () => {
+      recordBackgroundTimestamp();
+    };
+
+    const handlePageShow = () => {
+      if (checkShouldSessionLock()) {
+        setIsSessionLocked(true);
+        setSessionLockedState(true);
+      } else {
+        clearBackgroundTimestamp();
+      }
+    };
+
+    // Track user activity to prevent idle lock while user is actively working
+    let lastActivityLog = 0;
+    const handleUserActivity = () => {
+      const now = Date.now();
+      if (now - lastActivityLog > 5000) {
+        lastActivityLog = now;
+        recordUserActiveTimestamp();
+      }
+    };
+
+    // Regular interval to lock session if left unattended while foregrounded
+    const idleCheckInterval = setInterval(() => {
+      if (checkShouldSessionLock()) {
+        setIsSessionLocked(true);
+        setSessionLockedState(true);
+      }
+    }, 10000);
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleWindowBlur);
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('pointerdown', handleUserActivity);
+    window.addEventListener('keydown', handleUserActivity);
+    window.addEventListener('touchstart', handleUserActivity);
+    window.addEventListener('scroll', handleUserActivity, { passive: true });
+
+    // Initial check
+    if (checkShouldSessionLock()) {
+      setIsSessionLocked(true);
+      setSessionLockedState(true);
+    } else {
+      recordUserActiveTimestamp();
+    }
+
+    return () => {
+      clearInterval(idleCheckInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleWindowBlur);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('pointerdown', handleUserActivity);
+      window.removeEventListener('keydown', handleUserActivity);
+      window.removeEventListener('touchstart', handleUserActivity);
+      window.removeEventListener('scroll', handleUserActivity);
+    };
+  }, [isAuthenticated, profile]);
+
+  const handleUnlockSession = () => {
+    setIsSessionLocked(false);
+    setSessionLockedState(false);
+    recordUserActiveTimestamp();
+  };
+
+  const handleManualLockSession = () => {
+    setIsSessionLocked(true);
+    setSessionLockedState(true);
+  };
 
   // Auth & Onboarding Handlers
-  const handleAuthSuccess = async (name: string, emailOrPhone: string, isNewAccount: boolean) => {
+  const handleAuthSuccess = async (
+    name: string,
+    emailOrPhone: string,
+    isNewAccount: boolean,
+    userId?: string
+  ) => {
     setIsAuthModalOpen(false);
-    if (isNewAccount || !profile) {
+    const targetUid = userId || currentUser?.uid || auth.currentUser?.uid || `user_${Date.now()}`;
+    setActiveUserId(targetUid);
+    localStorage.setItem('smartledger_active_uid', targetUid);
+    const meta = { uid: targetUid, name, email: emailOrPhone };
+    localStorage.setItem('smartledger_active_user_meta', JSON.stringify(meta));
+
+    // Check if user already has a saved profile
+    const storage = userScopedStorage(targetUid);
+    const localProf = storage.getProfile();
+
+    if (!isNewAccount && localProf && localProf.name) {
+      // Existing user with saved data: load immediately without wizard!
+      await loadUserDataForUid(targetUid, emailOrPhone, name);
+      setIsAuthenticated(true);
+      setIsWizardOpen(false);
+    } else if (!isNewAccount && (currentUser || auth.currentUser)) {
+      // Check Firestore
+      await loadUserDataForUid(targetUid, emailOrPhone, name);
+    } else if (isNewAccount || !localProf || !localProf.name) {
+      // Genuinely new user with no profile
       setWizardUser({ name, email: emailOrPhone });
       setIsWizardOpen(true);
+      setIsAuthenticated(false);
     } else {
+      await loadUserDataForUid(targetUid, emailOrPhone, name);
       setIsAuthenticated(true);
+      setIsWizardOpen(false);
     }
   };
 
@@ -347,18 +655,23 @@ export function App() {
     setIsWizardOpen(false);
     setIsAuthenticated(true);
 
-    if (currentUser) {
-      const storage = userScopedStorage(currentUser.uid);
-      storage.saveProfile(newProfile);
-      storage.saveProducts([]);
-      storage.saveSales([]);
-      storage.saveExpenses([]);
-      storage.savePurchases([]);
-      storage.saveOtherIncomes([]);
-      storage.saveCustomers([]);
-      storage.saveSuppliers([]);
+    const targetUid = effectiveUserId || `user_${Date.now()}`;
+    setActiveUserId(targetUid);
+    localStorage.setItem('smartledger_active_uid', targetUid);
 
-      // Initialize clean empty workspace in Cloud Firestore
+    const storage = userScopedStorage(targetUid);
+    storage.saveProfile(newProfile);
+    // PRESERVE whatever products already exist (or empty array if none)
+    storage.saveProducts(products);
+    storage.saveSales(sales);
+    storage.saveExpenses(expenses);
+    storage.savePurchases(purchases);
+    storage.saveOtherIncomes(otherIncomes);
+    storage.saveCustomers(customers);
+    storage.saveSuppliers(suppliers);
+
+    if (currentUser?.uid) {
+      // Initialize workspace in Cloud Firestore
       await saveUserWorkspaceToFirestore(currentUser.uid, {
         userId: currentUser.uid,
         profile: newProfile,
@@ -372,13 +685,13 @@ export function App() {
           address: newProfile.address || '',
           logoUrl: newProfile.logoUrl || '',
         },
-        products: [],
-        sales: [],
-        purchases: [],
-        expenses: [],
-        income: [],
-        customers: [],
-        suppliers: [],
+        products,
+        sales,
+        purchases,
+        expenses,
+        income: otherIncomes,
+        customers,
+        suppliers,
         invoices: [],
         reports: [],
         notifications: [],
@@ -391,19 +704,118 @@ export function App() {
         productionLogs: [],
         wasteLogs: [],
       });
-      isInitialLoadComplete.current = true;
     }
+    isInitialLoadComplete.current = true;
   };
 
   const handleLogout = async () => {
+    const uid = effectiveUserId;
+    if (uid && profile) {
+      // 1. Immediately flush all state to local storage before clearing
+      const storage = userScopedStorage(uid);
+      storage.saveProfile(profile);
+      storage.saveProducts(products);
+      storage.saveSales(sales);
+      storage.saveExpenses(expenses);
+      storage.savePurchases(purchases);
+      storage.saveOtherIncomes(otherIncomes);
+      storage.saveCustomers(customers);
+      storage.saveSuppliers(suppliers);
+      storage.saveProductionLogs(productionLogs);
+      storage.saveWasteLogs(wasteLogs);
+      storage.saveShifts(shifts);
+      storage.saveCustomerReturns(returns);
+
+      // 2. If Firebase user, immediately flush to Firestore
+      if (currentUser?.uid) {
+        try {
+          await saveUserWorkspaceToFirestore(currentUser.uid, {
+            userId: currentUser.uid,
+            profile,
+            products,
+            sales,
+            expenses,
+            purchases,
+            income: otherIncomes,
+            customers,
+            suppliers,
+            productionLogs,
+            wasteLogs,
+            lastSyncedAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn('Flush before logout note:', e);
+        }
+      }
+    }
+
     try {
       await signOut(auth);
     } catch (err) {
       console.error('Logout error:', err);
     }
+    clearSessionLockStorage();
+    setIsSessionLocked(false);
+    localStorage.removeItem('smartledger_active_uid');
+    localStorage.removeItem('smartledger_active_user_meta');
+    setActiveUserId(null);
     clearLocalState();
     setIsAuthenticated(false);
     setIsWizardOpen(false);
+  };
+
+  // Product Management Handlers (Instant save & cloud synchronization)
+  const handleAddProduct = (newProd: Product) => {
+    const nextProducts = [newProd, ...products.filter((p) => p.id !== newProd.id)];
+    setProducts(nextProducts);
+
+    // 1. Immediately write to persistent local storage
+    const uid = effectiveUserId;
+    if (uid) {
+      userScopedStorage(uid).saveProducts(nextProducts);
+    }
+
+    // 2. Immediately write to Firestore if Firebase authenticated
+    if (currentUser?.uid) {
+      setCloudSyncStatus('syncing');
+      saveUserWorkspaceToFirestore(currentUser.uid, {
+        products: nextProducts,
+        lastSyncedAt: new Date().toISOString(),
+      })
+        .then(() => setCloudSyncStatus('synced'))
+        .catch(() => setCloudSyncStatus('offline'));
+    }
+
+    // 3. Log business activity
+    if (currentUser?.uid) {
+      logBusinessActivity(currentUser.uid, {
+        workspaceId: currentUser.uid,
+        type: 'production',
+        title: `Added product: ${newProd.name}`,
+        subtitle: `Stock: ${newProd.stock} ${newProd.unit || 'units'} • Price: ${formatCurrency(newProd.sellingPrice, profile?.currency || 'USD')}`,
+        amount: newProd.sellingPrice * newProd.stock,
+        quantity: newProd.stock,
+        productName: newProd.name,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+
+  const handleUpdateProduct = (updatedProd: Product) => {
+    const nextProducts = products.map((p) => (p.id === updatedProd.id ? updatedProd : p));
+    setProducts(nextProducts);
+
+    const uid = effectiveUserId;
+    if (uid) {
+      userScopedStorage(uid).saveProducts(nextProducts);
+    }
+
+    if (currentUser?.uid) {
+      saveUserWorkspaceToFirestore(currentUser.uid, {
+        products: nextProducts,
+        lastSyncedAt: new Date().toISOString(),
+      }).catch(() => {});
+    }
   };
 
   // Business Action Handlers
@@ -535,33 +947,60 @@ export function App() {
       dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       createdAt: new Date().toISOString(),
     };
-    setCustomers((prev) => [newCust, ...prev]);
+    const updatedCustomers = [newCust, ...customers];
+    setCustomers(updatedCustomers);
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    userScopedStorage(userId).saveCustomers(updatedCustomers);
+
+    if (currentUser?.uid) {
+      saveUserWorkspaceToFirestore(currentUser.uid, {
+        customers: updatedCustomers,
+      }).catch((e) => console.warn('Could not sync customer to Firestore:', e));
+
+      logBusinessActivity(currentUser.uid, {
+        workspaceId: currentUser.uid,
+        type: 'sale',
+        title: `Added Customer: ${name}`,
+        subtitle: phone ? `Phone: ${phone}` : 'New customer registered in directory',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     return newId;
   };
 
   const handleRecordCustomerPayment = (customerId: string, amount: number, notes?: string) => {
     const targetCustomer = customers.find((c) => c.id === customerId);
-    setCustomers((prev) =>
-      prev.map((c) =>
-        c.id === customerId
-          ? { ...c, amountOwed: Math.max(0, (c.amountOwed || 0) - amount) }
-          : c
-      )
+    const updatedCustomers = customers.map((c) =>
+      c.id === customerId
+        ? { ...c, amountOwed: Math.max(0, (c.amountOwed || 0) - amount) }
+        : c
     );
+    setCustomers(updatedCustomers);
 
     // Record as cash entry / income
-    setOtherIncomes((prev) => [
-      {
-        id: `inc_cust_pay_${Date.now()}`,
-        source: 'Other',
-        amount,
-        description: `Customer debt repayment: ${notes || ''}`,
-        date: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
+    const newIncome: OtherIncome = {
+      id: `inc_cust_pay_${Date.now()}`,
+      source: 'Other',
+      amount,
+      description: `Customer debt repayment: ${targetCustomer?.name || 'Customer'}${notes ? ` • ${notes}` : ''}`,
+      date: new Date().toISOString(),
+    };
+    const updatedIncomes = [newIncome, ...otherIncomes];
+    setOtherIncomes(updatedIncomes);
 
-    if (currentUser) {
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+    storage.saveCustomers(updatedCustomers);
+    storage.saveOtherIncomes(updatedIncomes);
+
+    if (currentUser?.uid) {
+      saveUserWorkspaceToFirestore(currentUser.uid, {
+        customers: updatedCustomers,
+        income: updatedIncomes,
+      }).catch((e) => console.warn('Could not sync customer payment to Firestore:', e));
+
       const custName = targetCustomer?.name || 'Customer';
       logBusinessActivity(currentUser.uid, {
         workspaceId: currentUser.uid,
@@ -575,6 +1014,185 @@ export function App() {
     }
   };
 
+  const handleDeleteCustomer = async (
+    customerId: string
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    if (isCashierMode) {
+      return {
+        success: false,
+        error: 'Cashier Mode is active. Only the Business Owner can delete customers.',
+      };
+    }
+
+    const customerToDelete = customers.find((c) => c.id === customerId);
+    if (!customerToDelete) {
+      return { success: false, error: 'Customer not found.' };
+    }
+
+    const customerNameLower = customerToDelete.name.trim().toLowerCase();
+    const hasSales = sales.some(
+      (s) =>
+        (s.customerId && s.customerId === customerId) ||
+        (s.customerName && s.customerName.trim().toLowerCase() === customerNameLower)
+    );
+    const hasDebt = (customerToDelete.amountOwed || 0) > 0;
+    const hasReturns = (returns || []).some(
+      (r) =>
+        (r.customerId && r.customerId === customerId) ||
+        (r.customerName && r.customerName.trim().toLowerCase() === customerNameLower)
+    );
+    const hasIncome = otherIncomes.some(
+      (i) => i.description && i.description.toLowerCase().includes(customerNameLower)
+    );
+
+    if (hasSales || hasDebt || hasReturns || hasIncome) {
+      return {
+        success: false,
+        error: 'Cannot permanently delete customer with connected financial history. Please archive instead.',
+      };
+    }
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      const updatedCustomers = customers.filter((c) => c.id !== customerId);
+      setCustomers(updatedCustomers);
+      storage.saveCustomers(updatedCustomers);
+
+      if (currentUser?.uid) {
+        await saveUserWorkspaceToFirestore(currentUser.uid, {
+          customers: updatedCustomers,
+        });
+
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'sale',
+          title: `Deleted Mistaken Customer: ${customerToDelete.name}`,
+          subtitle: 'Removed unused customer record from business directory.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return {
+        success: true,
+        message: `Customer "${customerToDelete.name}" deleted successfully.`,
+      };
+    } catch (err: any) {
+      console.error('Error deleting customer:', err);
+      return {
+        success: false,
+        error: err?.message || 'Database error occurred while deleting customer.',
+      };
+    }
+  };
+
+  const handleArchiveCustomer = async (
+    customerId: string
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    if (isCashierMode) {
+      return {
+        success: false,
+        error: 'Cashier Mode is active. Only the Business Owner can archive customers.',
+      };
+    }
+
+    const customerToArchive = customers.find((c) => c.id === customerId);
+    if (!customerToArchive) {
+      return { success: false, error: 'Customer not found.' };
+    }
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      const updatedCustomers = customers.map((c) =>
+        c.id === customerId
+          ? { ...c, isArchived: true, archivedAt: new Date().toISOString() }
+          : c
+      );
+      setCustomers(updatedCustomers);
+      storage.saveCustomers(updatedCustomers);
+
+      if (currentUser?.uid) {
+        await saveUserWorkspaceToFirestore(currentUser.uid, {
+          customers: updatedCustomers,
+        });
+
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'sale',
+          title: `Archived Customer: ${customerToArchive.name}`,
+          subtitle: 'Archived customer record while safely preserving all historical invoices and payments.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return {
+        success: true,
+        message: `Customer "${customerToArchive.name}" archived successfully.`,
+      };
+    } catch (err: any) {
+      console.error('Error archiving customer:', err);
+      return {
+        success: false,
+        error: err?.message || 'Database error occurred while archiving customer.',
+      };
+    }
+  };
+
+  const handleUnarchiveCustomer = async (
+    customerId: string
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    if (isCashierMode) {
+      return {
+        success: false,
+        error: 'Cashier Mode is active. Only the Business Owner can restore customers.',
+      };
+    }
+
+    const target = customers.find((c) => c.id === customerId);
+    if (!target) return { success: false, error: 'Customer not found.' };
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      const updatedCustomers = customers.map((c) =>
+        c.id === customerId
+          ? { ...c, isArchived: false, archivedAt: undefined }
+          : c
+      );
+      setCustomers(updatedCustomers);
+      storage.saveCustomers(updatedCustomers);
+
+      if (currentUser?.uid) {
+        await saveUserWorkspaceToFirestore(currentUser.uid, {
+          customers: updatedCustomers,
+        });
+
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'sale',
+          title: `Restored Customer: ${target.name}`,
+          subtitle: 'Reactivated customer to active business directory.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return {
+        success: true,
+        message: `Customer "${target.name}" restored to active list.`,
+      };
+    } catch (err: any) {
+      console.error('Error restoring customer:', err);
+      return {
+        success: false,
+        error: err?.message || 'Database error occurred while restoring customer.',
+      };
+    }
+  };
+
   const handleAddSupplier = (name: string, phone = '', productsSupplied: string[] = []): string => {
     const newId = `supp_${Date.now()}`;
     const newSupp: Supplier = {
@@ -585,31 +1203,243 @@ export function App() {
       productsSupplied,
       createdAt: new Date().toISOString(),
     };
-    setSuppliers((prev) => [newSupp, ...prev]);
+    const updatedSuppliers = [newSupp, ...suppliers];
+    setSuppliers(updatedSuppliers);
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    userScopedStorage(userId).saveSuppliers(updatedSuppliers);
+
+    if (currentUser?.uid) {
+      saveUserWorkspaceToFirestore(currentUser.uid, {
+        suppliers: updatedSuppliers,
+      }).catch((e) => console.warn('Could not sync supplier to Firestore:', e));
+
+      logBusinessActivity(currentUser.uid, {
+        workspaceId: currentUser.uid,
+        type: 'purchase',
+        title: `Added Supplier: ${name}`,
+        subtitle: phone ? `Phone: ${phone}` : 'New vendor registered in directory',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     return newId;
   };
 
   const handleRecordSupplierPayment = (supplierId: string, amount: number) => {
-    setSuppliers((prev) =>
-      prev.map((s) =>
-        s.id === supplierId
-          ? { ...s, amountOwed: Math.max(0, (s.amountOwed || 0) - amount) }
-          : s
-      )
+    const targetSupplier = suppliers.find((s) => s.id === supplierId);
+    const updatedSuppliers = suppliers.map((s) =>
+      s.id === supplierId
+        ? { ...s, amountOwed: Math.max(0, (s.amountOwed || 0) - amount) }
+        : s
+    );
+    setSuppliers(updatedSuppliers);
+
+    const newExpense: Expense = {
+      id: `exp_supp_pay_${Date.now()}`,
+      category: 'Other',
+      amount,
+      notes: `Paid supplier invoice: ${targetSupplier?.name || 'Vendor'}`,
+      paidVia: 'Cash',
+      date: new Date().toISOString(),
+    };
+    const updatedExpenses = [newExpense, ...expenses];
+    setExpenses(updatedExpenses);
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+    storage.saveSuppliers(updatedSuppliers);
+    storage.saveExpenses(updatedExpenses);
+
+    if (currentUser?.uid) {
+      saveUserWorkspaceToFirestore(currentUser.uid, {
+        suppliers: updatedSuppliers,
+        expenses: updatedExpenses,
+      }).catch((e) => console.warn('Could not sync payment to Firestore:', e));
+
+      logBusinessActivity(currentUser.uid, {
+        workspaceId: currentUser.uid,
+        type: 'expense',
+        title: `Paid Supplier: ${targetSupplier?.name || 'Vendor'} (${formatCurrency(amount, profile?.currency || 'RWF')})`,
+        subtitle: `Supplier balance reduced by ${formatCurrency(amount, profile?.currency || 'RWF')}`,
+        amount,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+
+  const handleDeleteSupplier = async (
+    supplierId: string
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    if (isCashierMode) {
+      return {
+        success: false,
+        error: 'Cashier Mode is active. Only the Business Owner can delete suppliers.',
+      };
+    }
+
+    const supplierToDelete = suppliers.find((s) => s.id === supplierId);
+    if (!supplierToDelete) {
+      return { success: false, error: 'Supplier not found.' };
+    }
+
+    const supplierNameLower = supplierToDelete.name.trim().toLowerCase();
+    const hasPurchases = purchases.some(
+      (p) =>
+        (p.supplierId && p.supplierId === supplierId) ||
+        (p.supplierName && p.supplierName.trim().toLowerCase() === supplierNameLower)
+    );
+    const hasDebt = (supplierToDelete.amountOwed || 0) > 0;
+    const hasExpenses = expenses.some(
+      (e) => e.notes && e.notes.toLowerCase().includes(supplierNameLower)
     );
 
-    // Record as expense
-    setExpenses((prev) => [
-      {
-        id: `exp_supp_pay_${Date.now()}`,
-        category: 'Other',
-        amount,
-        notes: `Paid supplier invoice`,
-        paidVia: 'Cash',
-        date: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
+    if (hasPurchases || hasDebt || hasExpenses) {
+      return {
+        success: false,
+        error: 'Cannot permanently delete supplier with connected financial history. Please archive instead.',
+      };
+    }
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      const updatedSuppliers = suppliers.filter((s) => s.id !== supplierId);
+      setSuppliers(updatedSuppliers);
+      storage.saveSuppliers(updatedSuppliers);
+
+      if (currentUser?.uid) {
+        await saveUserWorkspaceToFirestore(currentUser.uid, {
+          suppliers: updatedSuppliers,
+        });
+
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'purchase',
+          title: `Deleted Mistaken Supplier: ${supplierToDelete.name}`,
+          subtitle: 'Removed unused supplier record from business directory.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return {
+        success: true,
+        message: `Supplier "${supplierToDelete.name}" deleted successfully.`,
+      };
+    } catch (err: any) {
+      console.error('Error deleting supplier:', err);
+      return {
+        success: false,
+        error: err?.message || 'Database error occurred while deleting supplier.',
+      };
+    }
+  };
+
+  const handleArchiveSupplier = async (
+    supplierId: string
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    if (isCashierMode) {
+      return {
+        success: false,
+        error: 'Cashier Mode is active. Only the Business Owner can archive suppliers.',
+      };
+    }
+
+    const supplierToArchive = suppliers.find((s) => s.id === supplierId);
+    if (!supplierToArchive) {
+      return { success: false, error: 'Supplier not found.' };
+    }
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      const updatedSuppliers = suppliers.map((s) =>
+        s.id === supplierId
+          ? { ...s, isArchived: true, archivedAt: new Date().toISOString() }
+          : s
+      );
+      setSuppliers(updatedSuppliers);
+      storage.saveSuppliers(updatedSuppliers);
+
+      if (currentUser?.uid) {
+        await saveUserWorkspaceToFirestore(currentUser.uid, {
+          suppliers: updatedSuppliers,
+        });
+
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'purchase',
+          title: `Archived Supplier: ${supplierToArchive.name}`,
+          subtitle: 'Archived supplier record while safely preserving all historical purchase transactions.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return {
+        success: true,
+        message: `Supplier "${supplierToArchive.name}" archived successfully.`,
+      };
+    } catch (err: any) {
+      console.error('Error archiving supplier:', err);
+      return {
+        success: false,
+        error: err?.message || 'Database error occurred while archiving supplier.',
+      };
+    }
+  };
+
+  const handleUnarchiveSupplier = async (
+    supplierId: string
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    if (isCashierMode) {
+      return {
+        success: false,
+        error: 'Cashier Mode is active. Only the Business Owner can restore suppliers.',
+      };
+    }
+
+    const target = suppliers.find((s) => s.id === supplierId);
+    if (!target) return { success: false, error: 'Supplier not found.' };
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      const updatedSuppliers = suppliers.map((s) =>
+        s.id === supplierId
+          ? { ...s, isArchived: false, archivedAt: undefined }
+          : s
+      );
+      setSuppliers(updatedSuppliers);
+      storage.saveSuppliers(updatedSuppliers);
+
+      if (currentUser?.uid) {
+        await saveUserWorkspaceToFirestore(currentUser.uid, {
+          suppliers: updatedSuppliers,
+        });
+
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'purchase',
+          title: `Restored Supplier: ${target.name}`,
+          subtitle: 'Reactivated supplier to active business directory.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return {
+        success: true,
+        message: `Supplier "${target.name}" restored to active list.`,
+      };
+    } catch (err: any) {
+      console.error('Error restoring supplier:', err);
+      return {
+        success: false,
+        error: err?.message || 'Database error occurred while restoring supplier.',
+      };
+    }
   };
 
   const handleAddProduction = (log: ProductionLog) => {
@@ -802,16 +1632,35 @@ export function App() {
   };
 
   const handleUnlockPinSuccess = (newPin?: string) => {
-    if (pinModalMode === 'unlock_owner') {
+    if (newPin) {
+      // User successfully chose/updated their custom 4-digit PIN
+      setCashierPin(newPin);
+      localStorage.setItem('smartledger_cashier_pin', newPin);
+      if (profile) {
+        const updatedProfile: BusinessProfile = { ...profile, cashierPin: newPin };
+        setProfile(updatedProfile);
+        const userId = currentUser ? currentUser.uid : 'local_user_default';
+        userScopedStorage(userId).saveProfile(updatedProfile);
+
+        if (currentUser) {
+          saveUserWorkspaceToFirestore(currentUser.uid, { profile: updatedProfile });
+          logBusinessActivity(currentUser.uid, {
+            workspaceId: currentUser.uid,
+            type: 'sale',
+            title: 'Cashier Protection PIN Updated',
+            subtitle: 'A custom 4-digit PIN was configured to secure cashier POS mode',
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+    } else {
+      // Unlocked owner mode
       setIsCashierMode(false);
       localStorage.setItem('smartledger_is_cashier_mode', 'false');
       if (pendingTabAfterUnlock) {
         setActiveTab(pendingTabAfterUnlock);
         setPendingTabAfterUnlock(null);
       }
-    } else if (pinModalMode === 'set_pin' && newPin) {
-      setCashierPin(newPin);
-      localStorage.setItem('smartledger_cashier_pin', newPin);
     }
   };
 
@@ -826,6 +1675,629 @@ export function App() {
   const handleToggleBeginnerMode = () => {
     if (!profile) return;
     setProfile((prev) => prev ? { ...prev, beginnerMode: !prev.beginnerMode } : null);
+  };
+
+  // Secure Restart Business Handler: Safely archives current business records,
+  // preserves account & profile settings, and initializes clean 0-based period.
+  const handleRestartBusiness = async () => {
+    if (isCashierMode) {
+      alert('Cashier mode is active. Please unlock Owner mode to restart the business.');
+      return;
+    }
+
+    const userId = effectiveUserId || 'local_user_default';
+    const storage = userScopedStorage(userId);
+
+    const currentPeriodNum = profile?.periodNumber || 1;
+    const periodStart = profile?.currentPeriodStartedAt || profile?.createdAt || new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    const periodLabel = `Period #${currentPeriodNum} (${new Date(periodStart).toLocaleDateString()} - ${new Date(nowIso).toLocaleDateString()})`;
+
+    const totalSales = sales.reduce((sum, s) => sum + (s.totalAmount || 0), 0);
+    const totalExpenses = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+    const totalProfit = sales.reduce((sum, s) => sum + (s.profit || 0), 0) - totalExpenses;
+    const totalPurchases = purchases.reduce((sum, p) => sum + (p.totalAmount || 0), 0);
+    const totalIncome = otherIncomes.reduce((sum, i) => sum + (i.amount || 0), 0);
+
+    const archivedSnapshot: ArchivedBusinessPeriod = {
+      id: `period_${profile?.currentPeriodId || currentPeriodNum}_${Date.now()}`,
+      periodNumber: currentPeriodNum,
+      periodLabel,
+      startedAt: periodStart,
+      archivedAt: nowIso,
+      currency: profile?.currency || 'RWF',
+      summary: {
+        totalSales,
+        totalProfit,
+        totalExpenses,
+        totalPurchases,
+        totalIncome,
+        productsCount: products.length,
+        customersCount: customers.length,
+        suppliersCount: suppliers.length,
+        salesCount: sales.length,
+        expensesCount: expenses.length,
+        purchasesCount: purchases.length,
+      },
+      products: [...products],
+      sales: [...sales],
+      expenses: [...expenses],
+      purchases: [...purchases],
+      income: [...otherIncomes],
+      customers: [...customers],
+      suppliers: [...suppliers],
+      productionLogs: [...productionLogs],
+      wasteLogs: [...wasteLogs],
+      shifts: [...shifts],
+      customerReturns: [...returns],
+    };
+
+    // 1. Add to archived periods
+    const updatedArchived = [archivedSnapshot, ...archivedPeriods];
+    setArchivedPeriods(updatedArchived);
+    storage.saveArchivedPeriods(updatedArchived);
+
+    if (currentUser?.uid) {
+      archiveBusinessPeriodToFirestore(currentUser.uid, archivedSnapshot).catch((err) => {
+        console.warn('Could not archive period to Firestore subcollection:', err);
+      });
+    }
+
+    // 2. Next Period Profile
+    const nextPeriodNum = currentPeriodNum + 1;
+    const nextPeriodId = `period_${nextPeriodNum}_${Date.now()}`;
+    const nextPeriodStartedAt = nowIso;
+
+    const updatedProfile: BusinessProfile = {
+      ...profile!,
+      periodNumber: nextPeriodNum,
+      currentPeriodId: nextPeriodId,
+      currentPeriodStartedAt: nextPeriodStartedAt,
+    };
+
+    setProfile(updatedProfile);
+    storage.saveProfile(updatedProfile);
+
+    // 3. Reset active state strictly to zero/empty
+    setProducts([]);
+    setSales([]);
+    setExpenses([]);
+    setPurchases([]);
+    setOtherIncomes([]);
+    setCustomers([]);
+    setSuppliers([]);
+    setProductionLogs([]);
+    setWasteLogs([]);
+    setShifts([]);
+    setReturns([]);
+
+    // 4. Reset local storage for active business records
+    storage.saveProducts([]);
+    storage.saveSales([]);
+    storage.saveExpenses([]);
+    storage.savePurchases([]);
+    storage.saveOtherIncomes([]);
+    storage.saveCustomers([]);
+    storage.saveSuppliers([]);
+    storage.saveProductionLogs([]);
+    storage.saveWasteLogs([]);
+    storage.saveShifts([]);
+    storage.saveCustomerReturns([]);
+    storage.saveCashBase(0);
+
+    // 5. Persist clean slate to Firestore
+    if (currentUser?.uid) {
+      try {
+        await saveUserWorkspaceToFirestore(currentUser.uid, {
+          profile: updatedProfile,
+          currentPeriodId: nextPeriodId,
+          currentPeriodStartedAt: nextPeriodStartedAt,
+          products: [],
+          sales: [],
+          expenses: [],
+          purchases: [],
+          income: [],
+          customers: [],
+          suppliers: [],
+          productionLogs: [],
+          wasteLogs: [],
+        });
+
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'sale',
+          title: `Started Fresh: Period #${nextPeriodNum}`,
+          subtitle: `Clean starting point initialized. Period #${currentPeriodNum} archived safely.`,
+          timestamp: nextPeriodStartedAt,
+        });
+      } catch (err) {
+        console.warn('Firestore sync note during restart:', err);
+      }
+    }
+
+    // 6. Navigate to dashboard and close modals
+    setActiveTab('dashboard');
+    setIsRestartBusinessOpen(false);
+    setIsSettingsOpen(false);
+  };
+
+  // Update business profile handler
+  const handleUpdateProfile = (updated: Partial<BusinessProfile>) => {
+    if (!profile) return;
+    const newProfile: BusinessProfile = { ...profile, ...updated };
+    setProfile(newProfile);
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+    storage.saveProfile(newProfile);
+    if (currentUser?.uid) {
+      saveUserWorkspaceToFirestore(currentUser.uid, { profile: newProfile }).catch((err) => {
+        console.warn('Could not persist updated profile to Firestore:', err);
+      });
+    }
+  };
+
+  // Permanent Archived Period Deletion Handler (Owner-only, Database Permanent Removal)
+  const handleDeleteArchivedPeriod = async (
+    period: ArchivedBusinessPeriod
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    // 1. Role verification: Cashier mode must NOT allow deletion
+    if (isCashierMode) {
+      return {
+        success: false,
+        error: 'Cashier Mode is active. Only the Business Owner can permanently delete archived periods.',
+      };
+    }
+
+    // 2. Safeguard check: Active business period cannot be deleted
+    if (
+      period.id === profile?.currentPeriodId ||
+      period.periodNumber === profile?.periodNumber
+    ) {
+      return {
+        success: false,
+        error: 'The current active business period cannot be deleted.',
+      };
+    }
+
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      // 3. Permanently remove from Cloud Firestore subcollection
+      if (currentUser?.uid) {
+        const firestoreRes = await deleteArchivedPeriodFromFirestore(currentUser.uid, period.id);
+        if (!firestoreRes.success) {
+          console.warn('Firestore deleteArchivedPeriod warning:', firestoreRes.error);
+        }
+
+        // Log permanent deletion activity for owner audit trail
+        await logBusinessActivity(currentUser.uid, {
+          workspaceId: currentUser.uid,
+          type: 'sale',
+          title: `[Permanently Deleted] Archived Period #${period.periodNumber}`,
+          subtitle: `Permanently removed ${period.periodLabel} (${period.sales.length} sales, ${period.expenses.length} expenses) from database.`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      // 4. Update local storage and React state
+      const updatedPeriods = archivedPeriods.filter((p) => p.id !== period.id);
+      setArchivedPeriods(updatedPeriods);
+      storage.saveArchivedPeriods(updatedPeriods);
+
+      // 5. If this period is currently opened in the details modal, close it
+      if (selectedArchivedPeriod?.id === period.id) {
+        setSelectedArchivedPeriod(null);
+      }
+
+      return {
+        success: true,
+        message: 'Archived business period permanently deleted.',
+      };
+    } catch (err: any) {
+      console.error('Error deleting archived period:', err);
+      return {
+        success: false,
+        error: err?.message || 'Database error occurred while deleting archived period.',
+      };
+    }
+  };
+
+  // Safe Mistaken Record Deletion & Reversal Handler:
+  // Reverses transactions mathematically (sales, purchases, expenses, debt, waste, production)
+  // across database, dashboard stats, inventory, and customer/supplier balances.
+  const handleDeleteMistakenRecord = async ({
+    recordType,
+    recordId,
+    activityLogId,
+    extraInfo,
+  }: {
+    recordType: 'sale' | 'expense' | 'purchase' | 'customer_payment' | 'waste' | 'return' | 'production' | 'income' | 'customer' | 'supplier' | 'activity_only';
+    recordId: string;
+    activityLogId?: string;
+    extraInfo?: any;
+  }): Promise<{ success: boolean; message: string; error?: string }> => {
+    const userId = effectiveUserId || (currentUser ? currentUser.uid : 'local_user_default');
+    const storage = userScopedStorage(userId);
+
+    try {
+      if (recordType === 'sale') {
+        const saleToDelete = sales.find((s) => s.id === recordId);
+        if (!saleToDelete) {
+          if (activityLogId && currentUser?.uid) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          return { success: true, message: 'Record removed from activity feed.' };
+        }
+
+        // 1. Remove sale from state and storage
+        const updatedSales = sales.filter((s) => s.id !== recordId);
+        setSales(updatedSales);
+        storage.saveSales(updatedSales);
+
+        // 2. Restore inventory stock for each sold product
+        let updatedProducts = [...products];
+        if (saleToDelete.items && saleToDelete.items.length > 0) {
+          saleToDelete.items.forEach((item) => {
+            const prodIdx = updatedProducts.findIndex((p) => p.id === item.productId || p.name.toLowerCase() === item.productName.toLowerCase());
+            if (prodIdx >= 0) {
+              const curStock = updatedProducts[prodIdx].currentStock ?? 0;
+              updatedProducts[prodIdx] = {
+                ...updatedProducts[prodIdx],
+                currentStock: curStock + item.quantity,
+              };
+            }
+          });
+          setProducts(updatedProducts);
+          storage.saveProducts(updatedProducts);
+        }
+
+        // 3. If credit sale, deduct debt from customer balance
+        let updatedCustomers = [...customers];
+        if (saleToDelete.paymentMethod === 'Credit' && saleToDelete.customerId) {
+          const custIdx = updatedCustomers.findIndex((c) => c.id === saleToDelete.customerId);
+          if (custIdx >= 0) {
+            const curDebt = updatedCustomers[custIdx].currentBalance ?? 0;
+            const newDebt = Math.max(0, curDebt - saleToDelete.totalAmount);
+            updatedCustomers[custIdx] = {
+              ...updatedCustomers[custIdx],
+              currentBalance: newDebt,
+              debtHistory: (updatedCustomers[custIdx].debtHistory || []).filter(
+                (h) => !h.notes?.includes(saleToDelete.invoiceNumber)
+              ),
+            };
+            setCustomers(updatedCustomers);
+            storage.saveCustomers(updatedCustomers);
+          }
+        }
+
+        // 4. Update Firestore & Activity Log
+        if (currentUser?.uid) {
+          await saveUserWorkspaceToFirestore(currentUser.uid, {
+            sales: updatedSales,
+            products: updatedProducts,
+            customers: updatedCustomers,
+          });
+
+          await deleteBusinessActivityLogsByRelatedId(currentUser.uid, recordId);
+          if (activityLogId) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+
+          await logBusinessActivity(currentUser.uid, {
+            workspaceId: currentUser.uid,
+            type: 'sale',
+            title: `[Mistake Corrected] Deleted Sale #${saleToDelete.invoiceNumber}`,
+            subtitle: `Reversed items back to stock. Reduced sales by -${formatCurrency(saleToDelete.totalAmount, profile?.currency || 'RWF')}`,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
+        return {
+          success: true,
+          message: `Sale #${saleToDelete.invoiceNumber} deleted. Inventory restored and totals recalculated.`,
+        };
+      }
+
+      if (recordType === 'expense') {
+        const expenseToDelete = expenses.find((e) => e.id === recordId);
+        if (!expenseToDelete) {
+          if (activityLogId && currentUser?.uid) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          return { success: true, message: 'Expense record removed.' };
+        }
+
+        const updatedExpenses = expenses.filter((e) => e.id !== recordId);
+        setExpenses(updatedExpenses);
+        storage.saveExpenses(updatedExpenses);
+
+        // If this was a supplier debt payment, restore supplier balance
+        let updatedSuppliers = [...suppliers];
+        const supplierId = extraInfo?.supplierId;
+        if (supplierId) {
+          const sIdx = updatedSuppliers.findIndex((s) => s.id === supplierId);
+          if (sIdx >= 0) {
+            updatedSuppliers[sIdx] = {
+              ...updatedSuppliers[sIdx],
+              balanceOwed: (updatedSuppliers[sIdx].balanceOwed || 0) + expenseToDelete.amount,
+            };
+            setSuppliers(updatedSuppliers);
+            storage.saveSuppliers(updatedSuppliers);
+          }
+        }
+
+        if (currentUser?.uid) {
+          await saveUserWorkspaceToFirestore(currentUser.uid, {
+            expenses: updatedExpenses,
+            suppliers: updatedSuppliers,
+          });
+          await deleteBusinessActivityLogsByRelatedId(currentUser.uid, recordId);
+          if (activityLogId) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          await logBusinessActivity(currentUser.uid, {
+            workspaceId: currentUser.uid,
+            type: 'expense',
+            title: `[Mistake Corrected] Deleted Expense: ${expenseToDelete.category}`,
+            subtitle: `Removed -${formatCurrency(expenseToDelete.amount, profile?.currency || 'RWF')} expense. Recalculated net profit.`,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
+        return {
+          success: true,
+          message: `Expense deleted. Business expenses and net profit recalculated.`,
+        };
+      }
+
+      if (recordType === 'purchase') {
+        const purchaseToDelete = purchases.find((p) => p.id === recordId);
+        if (!purchaseToDelete) {
+          if (activityLogId && currentUser?.uid) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          return { success: true, message: 'Purchase record removed.' };
+        }
+
+        const updatedPurchases = purchases.filter((p) => p.id !== recordId);
+        setPurchases(updatedPurchases);
+        storage.savePurchases(updatedPurchases);
+
+        // Reverse stock addition (deduct added stock)
+        let updatedProducts = [...products];
+        const prodIdx = updatedProducts.findIndex(
+          (p) => p.id === purchaseToDelete.productId || p.name.toLowerCase() === purchaseToDelete.productName.toLowerCase()
+        );
+        if (prodIdx >= 0) {
+          const curStock = updatedProducts[prodIdx].currentStock ?? 0;
+          updatedProducts[prodIdx] = {
+            ...updatedProducts[prodIdx],
+            currentStock: Math.max(0, curStock - purchaseToDelete.quantity),
+          };
+          setProducts(updatedProducts);
+          storage.saveProducts(updatedProducts);
+        }
+
+        // If PAY_LATER, deduct debt owed to supplier
+        let updatedSuppliers = [...suppliers];
+        if (purchaseToDelete.paymentStatus === 'PAY_LATER') {
+          const sIdx = updatedSuppliers.findIndex(
+            (s) => s.id === purchaseToDelete.supplierId || s.name.toLowerCase() === purchaseToDelete.supplierName.toLowerCase()
+          );
+          if (sIdx >= 0) {
+            const curOwed = updatedSuppliers[sIdx].balanceOwed ?? 0;
+            updatedSuppliers[sIdx] = {
+              ...updatedSuppliers[sIdx],
+              balanceOwed: Math.max(0, curOwed - purchaseToDelete.totalCost),
+            };
+            setSuppliers(updatedSuppliers);
+            storage.saveSuppliers(updatedSuppliers);
+          }
+        }
+
+        if (currentUser?.uid) {
+          await saveUserWorkspaceToFirestore(currentUser.uid, {
+            purchases: updatedPurchases,
+            products: updatedProducts,
+            suppliers: updatedSuppliers,
+          });
+          await deleteBusinessActivityLogsByRelatedId(currentUser.uid, recordId);
+          if (activityLogId) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          await logBusinessActivity(currentUser.uid, {
+            workspaceId: currentUser.uid,
+            type: 'purchase',
+            title: `[Mistake Corrected] Deleted Purchase: ${purchaseToDelete.productName}`,
+            subtitle: `Reversed restock of ${purchaseToDelete.quantity} units from inventory.`,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
+        return {
+          success: true,
+          message: `Purchase removed. Inventory stock and supplier balances corrected.`,
+        };
+      }
+
+      if (recordType === 'customer_payment' || recordType === 'income') {
+        const updatedIncomes = otherIncomes.filter((i) => i.id !== recordId);
+        setOtherIncomes(updatedIncomes);
+        storage.saveOtherIncomes(updatedIncomes);
+
+        let updatedCustomers = [...customers];
+        const customerId = extraInfo?.customerId;
+        const amount = Number(extraInfo?.amount || 0);
+
+        if (customerId && amount > 0) {
+          const cIdx = updatedCustomers.findIndex((c) => c.id === customerId);
+          if (cIdx >= 0) {
+            updatedCustomers[cIdx] = {
+              ...updatedCustomers[cIdx],
+              currentBalance: (updatedCustomers[cIdx].currentBalance || 0) + amount,
+            };
+            setCustomers(updatedCustomers);
+            storage.saveCustomers(updatedCustomers);
+          }
+        }
+
+        if (currentUser?.uid) {
+          await saveUserWorkspaceToFirestore(currentUser.uid, {
+            income: updatedIncomes,
+            customers: updatedCustomers,
+          });
+          await deleteBusinessActivityLogsByRelatedId(currentUser.uid, recordId);
+          if (activityLogId) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          await logBusinessActivity(currentUser.uid, {
+            workspaceId: currentUser.uid,
+            type: 'debt',
+            title: `[Mistake Corrected] Deleted Customer Payment`,
+            subtitle: `Reversed customer payment. Restored customer balance by +${formatCurrency(amount, profile?.currency || 'RWF')}`,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
+        return {
+          success: true,
+          message: `Customer payment deleted. Customer balance restored.`,
+        };
+      }
+
+      if (recordType === 'waste') {
+        const wasteToDelete = wasteLogs.find((w) => w.id === recordId);
+        if (!wasteToDelete) {
+          if (activityLogId && currentUser?.uid) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          return { success: true, message: 'Waste record removed.' };
+        }
+
+        const updatedWaste = wasteLogs.filter((w) => w.id !== recordId);
+        setWasteLogs(updatedWaste);
+        storage.saveWasteLogs(updatedWaste);
+
+        // Restore stock for wasted item
+        let updatedProducts = [...products];
+        const pIdx = updatedProducts.findIndex(
+          (p) => p.id === wasteToDelete.productId || p.name.toLowerCase() === wasteToDelete.productName.toLowerCase()
+        );
+        if (pIdx >= 0) {
+          const curStock = updatedProducts[pIdx].currentStock ?? 0;
+          updatedProducts[pIdx] = {
+            ...updatedProducts[pIdx],
+            currentStock: curStock + wasteToDelete.quantityWasted,
+          };
+          setProducts(updatedProducts);
+          storage.saveProducts(updatedProducts);
+        }
+
+        if (currentUser?.uid) {
+          await saveUserWorkspaceToFirestore(currentUser.uid, {
+            wasteLogs: updatedWaste,
+            products: updatedProducts,
+          });
+          await deleteBusinessActivityLogsByRelatedId(currentUser.uid, recordId);
+          if (activityLogId) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          await logBusinessActivity(currentUser.uid, {
+            workspaceId: currentUser.uid,
+            type: 'waste',
+            title: `[Mistake Corrected] Deleted Waste Report: ${wasteToDelete.productName}`,
+            subtitle: `Restored ${wasteToDelete.quantityWasted} units back to stock and reversed loss.`,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
+        return {
+          success: true,
+          message: `Waste report deleted. ${wasteToDelete.quantityWasted} units restored to stock.`,
+        };
+      }
+
+      if (recordType === 'production') {
+        const prodToDelete = productionLogs.find((p) => p.id === recordId);
+        if (!prodToDelete) {
+          if (activityLogId && currentUser?.uid) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+          return { success: true, message: 'Production log removed.' };
+        }
+
+        const updatedProd = productionLogs.filter((p) => p.id !== recordId);
+        setProductionLogs(updatedProd);
+        storage.saveProductionLogs(updatedProd);
+
+        // Deduct produced quantity from inventory
+        let updatedProducts = [...products];
+        const pIdx = updatedProducts.findIndex(
+          (p) => p.id === prodToDelete.productId || p.name.toLowerCase() === prodToDelete.productName.toLowerCase()
+        );
+        if (pIdx >= 0) {
+          const curStock = updatedProducts[pIdx].currentStock ?? 0;
+          updatedProducts[pIdx] = {
+            ...updatedProducts[pIdx],
+            currentStock: Math.max(0, curStock - prodToDelete.quantityProduced),
+          };
+          setProducts(updatedProducts);
+          storage.saveProducts(updatedProducts);
+        }
+
+        if (currentUser?.uid) {
+          await saveUserWorkspaceToFirestore(currentUser.uid, {
+            productionLogs: updatedProd,
+            products: updatedProducts,
+          });
+          await deleteBusinessActivityLogsByRelatedId(currentUser.uid, recordId);
+          if (activityLogId) {
+            await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+          }
+        }
+
+        return {
+          success: true,
+          message: `Production record deleted and inventory stock adjusted.`,
+        };
+      }
+
+      if (recordType === 'return') {
+        const returnToDelete = returns.find((r) => r.id === recordId);
+        if (returnToDelete) {
+          const updatedReturns = returns.filter((r) => r.id !== recordId);
+          setReturns(updatedReturns);
+          storage.saveCustomerReturns(updatedReturns);
+          if (currentUser?.uid) {
+            await deleteBusinessActivityLogsByRelatedId(currentUser.uid, recordId);
+            if (activityLogId) {
+              await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+            }
+          }
+        }
+        return {
+          success: true,
+          message: `Return record removed successfully.`,
+        };
+      }
+
+      // Default fallback: activity only
+      if (activityLogId && currentUser?.uid) {
+        await deleteBusinessActivityLog(currentUser.uid, activityLogId);
+      }
+      return {
+        success: true,
+        message: `Activity record removed.`,
+      };
+    } catch (err: any) {
+      console.error('Error deleting mistaken record:', err);
+      return {
+        success: false,
+        message: 'Could not delete record.',
+        error: err?.message || 'Database error occurred while deleting record.',
+      };
+    }
   };
 
   // 1. Splash Screen Lifecycle
@@ -882,7 +2354,21 @@ export function App() {
     );
   }
 
-  // 4. Main Multi-Tenant SmartLedger Application
+  // 4. Secure Automatic Session Lock Screen (Zero business data rendered in DOM while locked)
+  if (isSessionLocked) {
+    return (
+      <SessionLockScreen
+        profile={profile}
+        currentUserEmail={currentUser?.email || profile?.email}
+        currentUserName={profile?.ownerName || currentUser?.displayName}
+        cashierPin={cashierPin}
+        onUnlockSuccess={handleUnlockSession}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  // 5. Main Multi-Tenant SmartLedger Application
   return (
     <div 
       id="smartledger-main-app" 
@@ -1017,30 +2503,57 @@ export function App() {
 
           {/* Right Action Controls */}
           <div className="flex items-center gap-2">
-            {/* Cashier Mode Toggle Button */}
+            {/* Cashier Mode Toggle & PIN Configuration Controls */}
             {isCashierMode ? (
-              <button
-                id="header-cashier-mode-btn"
-                onClick={() => {
-                  setPinModalMode('unlock_owner');
-                  setIsPinModalOpen(true);
-                }}
-                title="Staff Cashier Mode Active. Tap with Owner PIN to unlock all features."
-                className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Lock className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden sm:inline">Cashier Locked</span>
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  id="header-cashier-mode-btn"
+                  onClick={() => {
+                    setPinModalMode('unlock_owner');
+                    setIsPinModalOpen(true);
+                  }}
+                  title="Staff Cashier Mode Active. Tap with PIN to unlock owner view."
+                  className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Lock className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden sm:inline">Cashier Locked</span>
+                </button>
+                <button
+                  id="header-cashier-set-pin-btn"
+                  onClick={() => {
+                    setPinModalMode('set_pin');
+                    setIsPinModalOpen(true);
+                  }}
+                  title="Choose or Change your custom 4-Digit Cashier PIN"
+                  className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-white transition-colors cursor-pointer border border-slate-700"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                </button>
+              </div>
             ) : (
-              <button
-                id="header-lock-cashier-btn"
-                onClick={handleLockCashierMode}
-                title="Switch to Cashier Mode (hides profits & restricts staff to sales)"
-                className="hidden sm:flex px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold items-center gap-1.5 transition-colors cursor-pointer border border-slate-700"
-              >
-                <Unlock className="w-3.5 h-3.5 text-slate-400" />
-                <span className="hidden md:inline">Lock Cashier</span>
-              </button>
+              <div className="hidden sm:flex items-center gap-1.5">
+                <button
+                  id="header-choose-pin-btn"
+                  onClick={() => {
+                    setPinModalMode('set_pin');
+                    setIsPinModalOpen(true);
+                  }}
+                  title="Choose or Change 4-digit Cashier Protection PIN"
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer border border-slate-700"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="hidden lg:inline">Set PIN</span>
+                </button>
+                <button
+                  id="header-lock-cashier-btn"
+                  onClick={handleLockCashierMode}
+                  title="Switch to Cashier Mode (hides profits & restricts staff to sales)"
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700"
+                >
+                  <Unlock className="w-3.5 h-3.5 text-slate-400" />
+                  <span className="hidden md:inline">Lock Cashier</span>
+                </button>
+              </div>
             )}
 
             {/* Shift / Daily Cash Drawer (Z-Report) Quick Action */}
@@ -1082,6 +2595,28 @@ export function App() {
               </button>
             )}
 
+            {/* Share App / Link Button */}
+            <button
+              id="top-share-app-btn"
+              onClick={() => setIsShareModalOpen(true)}
+              title="Share app link or QR code with users and cashiers"
+              className="px-2.5 py-1.5 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer border border-indigo-500/40"
+            >
+              <Share2 className="w-3.5 h-3.5 text-indigo-300" />
+              <span className="hidden sm:inline">Share App</span>
+            </button>
+
+            {/* Business Settings & Restart Business Quick Action */}
+            <button
+              id="top-settings-btn"
+              onClick={() => setIsSettingsOpen(true)}
+              title="Business Settings & Restart Business"
+              className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700"
+            >
+              <SettingsIcon className="w-3.5 h-3.5 text-slate-400" />
+              <span className="hidden sm:inline">Settings</span>
+            </button>
+
             {/* AI Assistant Button */}
             <button
               id="top-ask-ai-btn"
@@ -1103,6 +2638,16 @@ export function App() {
                 <Flame className="w-4 h-4 fill-amber-400" />
               </button>
             )}
+
+            {/* Quick Lock Session Button */}
+            <button
+              id="top-lock-session-btn"
+              onClick={handleManualLockSession}
+              title="Lock Session Now (Protects sensitive data)"
+              className="p-2 rounded-xl text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            </button>
 
             {/* Logout Button */}
             <button
@@ -1158,6 +2703,26 @@ export function App() {
                 </button>
               );
             })}
+            <button
+              onClick={() => {
+                setIsSettingsOpen(true);
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full p-2.5 rounded-xl flex items-center gap-2.5 text-left text-slate-300 hover:bg-slate-900 transition-colors"
+            >
+              <SettingsIcon className="w-4 h-4 text-slate-400" />
+              <span>Business Settings & Restart</span>
+            </button>
+            <button
+              onClick={() => {
+                setIsMobileMenuOpen(false);
+                handleManualLockSession();
+              }}
+              className="w-full p-2.5 rounded-xl flex items-center gap-2.5 text-left text-amber-300 hover:bg-slate-900 transition-colors"
+            >
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <span>Lock Session Now</span>
+            </button>
           </div>
         )}
       </header>
@@ -1177,6 +2742,12 @@ export function App() {
               setPinModalMode('unlock_owner');
               setIsPinModalOpen(true);
             }}
+            onChangeCashierPin={() => {
+              setPinModalMode('set_pin');
+              setIsPinModalOpen(true);
+            }}
+            onOpenShareApp={() => setIsShareModalOpen(true)}
+            onOpenSettings={() => setIsSettingsOpen(true)}
             onLockCashierMode={handleLockCashierMode}
             onOpenPurchaseOrder={() => setIsPOModalOpen(true)}
             onOpenShiftReconciliation={() => setIsShiftModalOpen(true)}
@@ -1197,10 +2768,8 @@ export function App() {
             products={products}
             currency={profile.currency}
             isBeginner={profile.beginnerMode}
-            onAddProduct={(newP) => setProducts((prev) => [newP, ...prev])}
-            onUpdateProduct={(updatedP) =>
-              setProducts((prev) => prev.map((p) => (p.id === updatedP.id ? updatedP : p)))
-            }
+            onAddProduct={handleAddProduct}
+            onUpdateProduct={handleUpdateProduct}
             onQuickSell={() => {
               setIsSellOpen(true);
             }}
@@ -1212,10 +2781,20 @@ export function App() {
           <CustomersView
             customers={customers}
             sales={sales}
+            customerReturns={returns}
+            otherIncomes={otherIncomes}
             currency={profile.currency}
             isBeginner={profile.beginnerMode}
+            isCashierMode={isCashierMode}
+            onUnlockCashierMode={() => {
+              setPinModalMode('unlock_owner');
+              setIsPinModalOpen(true);
+            }}
             onAddCustomer={handleAddCustomer}
             onRecordCustomerPayment={handleRecordCustomerPayment}
+            onDeleteCustomer={handleDeleteCustomer}
+            onArchiveCustomer={handleArchiveCustomer}
+            onUnarchiveCustomer={handleUnarchiveCustomer}
           />
         )}
 
@@ -1223,10 +2802,19 @@ export function App() {
           <SuppliersView
             suppliers={suppliers}
             purchases={purchases}
+            expenses={expenses}
             currency={profile.currency}
             isBeginner={profile.beginnerMode}
+            isCashierMode={isCashierMode}
+            onUnlockCashierMode={() => {
+              setPinModalMode('unlock_owner');
+              setIsPinModalOpen(true);
+            }}
             onAddSupplier={handleAddSupplier}
             onRecordSupplierPayment={handleRecordSupplierPayment}
+            onDeleteSupplier={handleDeleteSupplier}
+            onArchiveSupplier={handleArchiveSupplier}
+            onUnarchiveSupplier={handleUnarchiveSupplier}
             onOpenPurchaseOrder={() => setIsPOModalOpen(true)}
           />
         )}
@@ -1242,8 +2830,8 @@ export function App() {
             isBeginner={profile.beginnerMode}
             onToggleBeginnerMode={handleToggleBeginnerMode}
             onRefreshSales={async () => {
-              if (currentUser) {
-                await loadUserData(currentUser);
+              if (effectiveUserId) {
+                await loadUserDataForUid(effectiveUserId, profile?.email, profile?.ownerName);
               }
             }}
             onNavigateToSales={() => {
@@ -1254,9 +2842,10 @@ export function App() {
 
         {activeTab === 'feed' && (
           <BusinessFeedView
-            workspaceId={currentUser?.uid || ''}
+            workspaceId={effectiveUserId || currentUser?.uid || ''}
             businessName={profile.name}
             currency={profile.currency}
+            currentPeriodStartedAt={profile.currentPeriodStartedAt}
             products={products}
             sales={sales}
             expenses={expenses}
@@ -1265,6 +2854,9 @@ export function App() {
             suppliers={suppliers}
             productionLogs={productionLogs}
             wasteLogs={wasteLogs}
+            otherIncomes={otherIncomes}
+            returns={returns}
+            onDeleteRecord={handleDeleteMistakenRecord}
           />
         )}
       </main>
@@ -1273,7 +2865,7 @@ export function App() {
       <footer className="bg-white border-t border-slate-200 py-4 pb-24 md:pb-4 text-center text-xs text-slate-500">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>
-            <strong>SmartLedger</strong> &mdash; Multi-Tenant Business OS &copy; {new Date().getFullYear()}
+            <strong>SmartLedger</strong> &mdash; Your Business. Made Simple. &copy; {new Date().getFullYear()}
           </span>
           <div className="flex items-center gap-3">
             <button
@@ -1298,6 +2890,7 @@ export function App() {
         activeTab={activeTab}
         onSelectTab={handleNavigateTab}
         beginnerMode={profile.beginnerMode}
+        isCashierMode={isCashierMode}
       />
 
       {/* Modal Dialogs */}
@@ -1439,6 +3032,67 @@ export function App() {
         isOpen={isFirebaseConsoleModalOpen}
         onClose={() => setIsFirebaseConsoleModalOpen(false)}
         onContinueOffline={handleContinueOffline}
+      />
+
+      {/* Share App Link & QR Code Modal */}
+      <ShareAppModal
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+        businessName={profile?.name || 'SmartLedger'}
+      />
+
+      {/* Business Settings & Archived Records Modal */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        profile={profile}
+        onUpdateProfile={handleUpdateProfile}
+        archivedPeriods={archivedPeriods}
+        onOpenRestartBusiness={() => {
+          setIsSettingsOpen(false);
+          setIsRestartBusinessOpen(true);
+        }}
+        onViewArchivedPeriod={(period) => {
+          setSelectedArchivedPeriod(period);
+        }}
+        onOpenArchivedPeriod={(period) => {
+          setSelectedArchivedPeriod(period);
+        }}
+        onDeleteArchivedPeriod={handleDeleteArchivedPeriod}
+        isCashierMode={isCashierMode}
+        onUnlockCashierMode={() => {
+          setPinModalMode('unlock');
+          setIsPinModalOpen(true);
+        }}
+        onChangeCashierPin={() => {
+          setPinModalMode('set');
+          setIsPinModalOpen(true);
+        }}
+        onOpenFirebaseConsole={() => setIsFirebaseConsoleModalOpen(true)}
+        isDevOrOwner={isDevOrOwner}
+      />
+
+      {/* Secure Restart Business Confirmation Modal */}
+      <RestartBusinessModal
+        isOpen={isRestartBusinessOpen}
+        onClose={() => setIsRestartBusinessOpen(false)}
+        businessName={profile.name}
+        currentPeriodNumber={profile.periodNumber || 1}
+        onConfirmRestart={handleRestartBusiness}
+      />
+
+      {/* Archived Business Period Details Modal (Read-Only) */}
+      <ArchivedPeriodDetailsModal
+        period={selectedArchivedPeriod}
+        isOpen={Boolean(selectedArchivedPeriod)}
+        onClose={() => setSelectedArchivedPeriod(null)}
+        profile={profile}
+        isCashierMode={isCashierMode}
+        onUnlockCashierMode={() => {
+          setPinModalMode('unlock');
+          setIsPinModalOpen(true);
+        }}
+        onDeleteArchivedPeriod={handleDeleteArchivedPeriod}
       />
     </div>
   );

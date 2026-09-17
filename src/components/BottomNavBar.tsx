@@ -5,6 +5,7 @@ import {
   Users, 
   Truck, 
   BarChart3,
+  Lock,
   LucideIcon
 } from 'lucide-react';
 
@@ -14,6 +15,7 @@ interface BottomNavBarProps {
   activeTab: string;
   onSelectTab: (tab: NavTabId) => void;
   beginnerMode?: boolean;
+  isCashierMode?: boolean;
 }
 
 interface NavItemConfig {
@@ -66,6 +68,7 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
   activeTab,
   onSelectTab,
   beginnerMode = false,
+  isCashierMode = false,
 }) => {
   return (
     <nav
@@ -104,6 +107,11 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
                     isActive ? 'scale-110 stroke-[2.4]' : 'scale-100 stroke-[1.8] group-hover:scale-105'
                   }`}
                 />
+                {item.id === 'reports' && isCashierMode && (
+                  <span className="absolute -top-1 -right-1 bg-amber-500 text-slate-950 p-0.5 rounded-full shadow-xs">
+                    <Lock className="w-2.5 h-2.5" />
+                  </span>
+                )}
               </div>
 
               {/* Text Label */}

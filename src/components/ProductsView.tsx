@@ -142,9 +142,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
       minStockLevel: parseInt(minStockLevel) || 10,
       unit: unit || 'units',
       notes: notes.trim(),
-      expiryDate: expiryDate || undefined,
-      batchNumber: batchNumber.trim() || undefined,
-      variants: formattedVariants.length > 0 ? formattedVariants : undefined,
+      ...(expiryDate ? { expiryDate } : {}),
+      ...(batchNumber.trim() ? { batchNumber: batchNumber.trim() } : {}),
+      ...(formattedVariants.length > 0 ? { variants: formattedVariants } : {}),
     };
 
     onAddProduct(newProd);

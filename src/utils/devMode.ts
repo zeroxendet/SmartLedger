@@ -6,7 +6,9 @@ import { useState, useEffect } from 'react';
 export const OWNER_EMAILS = [
   'zeroxendet@gmail.com',
   'admin@smartledger.app',
-  'owner@smartledger.app'
+  'owner@smartledger.app',
+  'admin@smartledger.rw',
+  'owner@smartledger.rw'
 ];
 
 /**
@@ -52,7 +54,7 @@ export function checkIsDevOrOwner(currentUserEmail?: string | null): boolean {
     if (OWNER_EMAILS.some(o => o.toLowerCase() === email)) {
       return true;
     }
-    if (email.endsWith('@smartledger.app') || email.includes('+admin') || email.includes('+dev')) {
+    if (email.endsWith('@smartledger.app') || email.endsWith('@smartledger.rw') || email.includes('+admin') || email.includes('+dev')) {
       return true;
     }
   }

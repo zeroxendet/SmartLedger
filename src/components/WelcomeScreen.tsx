@@ -9,7 +9,6 @@ import {
   Cloud, 
   Lock, 
   Flame, 
-  Laptop,
   Code2,
   Eye
 } from 'lucide-react';
@@ -153,24 +152,6 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           </button>
         </div>
 
-        {/* 2. Developer UI: "Enter Workspace Instantly (Zero Setup Needed) ->" (Restricted to Owner/Dev) */}
-        {isDevOrOwner && onContinueOffline && (
-          <div className="max-w-md mx-auto mb-5">
-            <button
-              id="welcome-instant-workspace-btn"
-              onClick={onContinueOffline}
-              className="w-full py-3 px-6 rounded-xl bg-emerald-950/70 hover:bg-emerald-900/80 border border-emerald-500/50 text-emerald-300 hover:text-emerald-200 font-semibold text-sm transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md"
-            >
-              <Laptop className="w-4 h-4 text-emerald-400" />
-              <span>Enter Workspace Instantly (Zero Setup Needed)</span>
-              <ArrowRight className="w-3.5 h-3.5 text-emerald-400" />
-            </button>
-            <p className="text-[11px] text-slate-400 mt-1.5 text-center">
-              100% private, empty ledger &mdash; start creating products & sales right now.
-            </p>
-          </div>
-        )}
-
         {/* 3. Developer UI: Yellow link "Connect Firebase Console Guide" (Restricted to Owner/Dev) */}
         {isDevOrOwner && (
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3 text-xs text-slate-400 pt-1">
@@ -190,9 +171,9 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         <span 
           onClick={handleCopyrightClick}
           className="cursor-pointer select-none transition-colors hover:text-slate-400"
-          title="SmartLedger Multi-Tenant Business OS"
+          title="SmartLedger — Your Business. Made Simple."
         >
-          SmartLedger &copy; {new Date().getFullYear()} — Multi-Tenant Business OS
+          SmartLedger &copy; {new Date().getFullYear()} — Your Business. Made Simple.
         </span>
         <div className="flex items-center gap-3">
           {/* 4. Developer UI: Footer link "Firebase Settings" (Restricted to Owner/Dev) */}

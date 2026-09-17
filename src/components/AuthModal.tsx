@@ -8,11 +8,10 @@ import {
   ShieldCheck, 
   Sparkles, 
   KeyRound, 
-  Cloud, 
   Flame, 
   AlertCircle, 
   ExternalLink,
-  Laptop
+  Lock
 } from 'lucide-react';
 import { 
   auth, 
@@ -23,8 +22,16 @@ import {
   signInWithPopup,
   formatFirebaseErrorMessage
 } from '../firebase';
+import { 
+  fetchSignInMethodsForEmail, 
+  GoogleAuthProvider, 
+  linkWithCredential, 
+  EmailAuthProvider,
+  AuthCredential 
+} from 'firebase/auth';
 import { FirebaseConsoleModal } from './FirebaseConsoleModal';
 import { useDevMode } from '../utils/devMode';
+import { getAppPublicUrl } from '../utils/domainConfig';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -42,7 +49,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onClose,
   onSuccess,
   onAuthSuccess,
-  onContinueOffline,
   initialMode = 'login',
   isDev,
   currentUserEmail,
@@ -57,12 +63,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   
-  // Rich error state
+  // Rich error state with actionable options
   const [errorDetails, setErrorDetails] = useState<{
     title: string;
     message: string;
-    actionType?: 'enable_provider' | 'create_account' | 'login' | 'authorize_domain' | 'open_console';
+    actionType?: 'enable_provider' | 'create_account' | 'login' | 'authorize_domain' | 'open_console' | 'continue_with_google' | 'link_password';
   } | null>(null);
+
+  // Account linking state when Google sign-in encounters existing password account
+  const [pendingGoogleCred, setPendingGoogleCred] = useState<AuthCredential | null>(null);
+  const [linkingEmail, setLinkingEmail] = useState('');
+  const [linkingPassword, setLinkingPassword] = useState('');
+  const [isLinkingLoading, setIsLinkingLoading] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConsoleModalOpen, setIsConsoleModalOpen] = useState(false);
@@ -74,9 +86,114 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     if (trimmed.includes('@')) {
       return trimmed;
     }
-    // Clean alphanumeric characters for local mock-domain email
     const sanitized = trimmed.replace(/[^a-zA-Z0-9]/g, '');
     return `${sanitized || 'owner'}@smartledger.app`;
+  };
+
+  const handleGoogleSignIn = async () => {
+    setErrorDetails(null);
+    setIsSubmitting(true);
+    try {
+      const userCredential = await signInWithPopup(auth, googleProvider);
+      const user = userCredential.user;
+
+      // Update provider registry cache for instant detection across sessions
+      try {
+        if (user.email) {
+          const providers = user.providerData.map((p) => p.providerId);
+          localStorage.setItem(
+            `smartledger_account_provider_${user.email.toLowerCase()}`,
+            JSON.stringify({ providers })
+          );
+        }
+      } catch {}
+
+      setSuccessMessage(`✓ Signed in as ${user.displayName || user.email}!`);
+      setTimeout(() => {
+        setIsSubmitting(false);
+        triggerSuccess(
+          user.displayName || 'Business Owner',
+          user.email || '',
+          false,
+          user.uid
+        );
+        onClose();
+      }, 700);
+    } catch (err: any) {
+      setIsSubmitting(false);
+
+      // Handle account linking: user already has an Email/Password account with the same email
+      if (err.code === 'auth/account-exists-with-different-credential') {
+        const email = err.customData?.email || err.email || emailOrPhone;
+        const cred = GoogleAuthProvider.credentialFromError(err);
+        setPendingGoogleCred(cred);
+        setLinkingEmail(email);
+        setErrorDetails({
+          title: 'Link Your Google Account',
+          message: `An account already exists for "${email}". Enter your account password to link your Google account to your business data.`,
+          actionType: 'link_password',
+        });
+        return;
+      }
+
+      const formatted = formatFirebaseErrorMessage(err);
+      setErrorDetails(formatted);
+    }
+  };
+
+  const handleVerifyAndLinkAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!linkingPassword) {
+      return;
+    }
+    setIsLinkingLoading(true);
+    try {
+      // 1. Authenticate with existing email and password
+      const userCredential = await signInWithEmailAndPassword(auth, linkingEmail, linkingPassword);
+      const user = userCredential.user;
+
+      // 2. Link pending Google credential directly to the existing UID (Never creates duplicate UID!)
+      if (pendingGoogleCred) {
+        await linkWithCredential(user, pendingGoogleCred);
+      }
+
+      // 3. Update provider registry cache
+      try {
+        const providers = user.providerData.map((p) => p.providerId);
+        if (!providers.includes('google.com')) providers.push('google.com');
+        localStorage.setItem(
+          `smartledger_account_provider_${linkingEmail.toLowerCase()}`,
+          JSON.stringify({ providers })
+        );
+      } catch {}
+
+      setSuccessMessage('✓ Google account successfully linked to your existing business ledger!');
+      setTimeout(() => {
+        setIsLinkingLoading(false);
+        triggerSuccess(
+          user.displayName || fullName || 'Business Owner',
+          user.email || linkingEmail,
+          false,
+          user.uid
+        );
+        onClose();
+      }, 800);
+    } catch (linkErr: any) {
+      setIsLinkingLoading(false);
+      if (linkErr.code === 'auth/wrong-password' || linkErr.code === 'auth/invalid-credential') {
+        setErrorDetails({
+          title: 'Incorrect Password',
+          message: 'The password entered does not match our records for this account.',
+          actionType: 'link_password',
+        });
+      } else {
+        setErrorDetails({
+          title: 'Linking Error',
+          message: linkErr.message || 'Failed to link Google credential. Please try again.',
+          actionType: 'link_password',
+        });
+      }
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -126,44 +243,51 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         try {
           const userCredential = await createUserWithEmailAndPassword(auth, emailValue, password);
           createdUid = userCredential.user.uid;
+
+          // Record provider in registry
+          try {
+            localStorage.setItem(
+              `smartledger_account_provider_${emailValue.toLowerCase()}`,
+              JSON.stringify({ providers: ['password'] })
+            );
+          } catch {}
         } catch (fbErr: any) {
-          const formatted = formatFirebaseErrorMessage(fbErr);
           if (fbErr.code === 'auth/email-already-in-use') {
-            // If already exists, attempt login with same credentials
+            // Check if this account was created with Google
+            let isGoogleAccount = false;
             try {
-              const userCredential = await signInWithEmailAndPassword(auth, emailValue, password);
-              createdUid = userCredential.user.uid;
-            } catch {
-              setErrorDetails(formatted);
+              const methods = await fetchSignInMethodsForEmail(auth, emailValue);
+              if (methods.includes('google.com')) {
+                isGoogleAccount = true;
+              }
+            } catch {}
+
+            if (isGoogleAccount) {
+              setErrorDetails({
+                title: 'Account Already Exists with Google',
+                message: 'This email is already registered using Google Sign-In. Please sign in with Google, or switch to Log In.',
+                actionType: 'continue_with_google',
+              });
               setIsSubmitting(false);
               return;
             }
-          } else if (fbErr.code === 'auth/operation-not-allowed') {
-            // Firebase Email/Password provider is not toggled in console yet.
-            // Self-heal: register account locally so the user is never blocked!
-            const localUid = `user_${Date.now()}`;
-            localStorage.setItem(`smartledger_user_${emailValue}`, JSON.stringify({
-              uid: localUid,
-              fullName,
-              email: emailValue,
-              password,
-            }));
-            createdUid = localUid;
-            setSuccessMessage('✓ Account created successfully! Setting up your business...');
-            setTimeout(() => {
-              setIsSubmitting(false);
-              triggerSuccess(fullName, emailOrPhone, true, createdUid);
-              onClose();
-            }, 600);
-            return;
-          } else {
-            setErrorDetails(formatted);
+
+            setErrorDetails({
+              title: 'Account Already Exists',
+              message: `An account for "${emailOrPhone}" already exists. Please log in with your password.`,
+              actionType: 'login',
+            });
             setIsSubmitting(false);
             return;
           }
+
+          const formatted = formatFirebaseErrorMessage(fbErr);
+          setErrorDetails(formatted);
+          setIsSubmitting(false);
+          return;
         }
 
-        setSuccessMessage('✓ Firebase account created! Setting up business...');
+        setSuccessMessage('✓ Account created! Setting up your business ledger...');
         setTimeout(() => {
           setIsSubmitting(false);
           triggerSuccess(fullName, emailOrPhone, true, createdUid || auth.currentUser?.uid);
@@ -192,42 +316,69 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         try {
           const userCredential = await signInWithEmailAndPassword(auth, emailValue, password);
           loggedInUid = userCredential.user.uid;
-        } catch (fbErr: any) {
-          if (fbErr.code === 'auth/operation-not-allowed') {
-            // Check if user account was created locally or automatically log in
-            const raw = localStorage.getItem(`smartledger_user_${emailValue}`);
-            if (raw) {
-              try {
-                const stored = JSON.parse(raw);
-                if (stored.password === password) {
-                  loggedInUid = stored.uid;
-                  setSuccessMessage('✓ Logged in! Loading your business ledger...');
-                  setTimeout(() => {
-                    setIsSubmitting(false);
-                    triggerSuccess(stored.fullName || 'Business Owner', emailOrPhone, false, loggedInUid);
-                    onClose();
-                  }, 600);
-                  return;
-                } else {
-                  setErrorDetails({
-                    title: 'Incorrect Password',
-                    message: 'The password entered does not match our records.',
-                  });
-                  setIsSubmitting(false);
-                  return;
-                }
-              } catch {}
-            } else {
-              // Not found in local registry either, suggest creating account or auto-create
-              setErrorDetails({
-                title: 'No Account Found',
-                message: `No account exists for "${emailOrPhone}". Click below to create your account in 1 click!`,
-                actionType: 'create_account',
-              });
-              setIsSubmitting(false);
-              return;
+
+          // Update provider registry cache
+          try {
+            if (userCredential.user.email) {
+              const providers = userCredential.user.providerData.map((p) => p.providerId);
+              localStorage.setItem(
+                `smartledger_account_provider_${userCredential.user.email.toLowerCase()}`,
+                JSON.stringify({ providers })
+              );
             }
+          } catch {}
+        } catch (fbErr: any) {
+          // CRITICAL: Check if this account was created with Google and has no password credential!
+          let isGoogleOnly = false;
+          try {
+            const methods = await fetchSignInMethodsForEmail(auth, emailValue);
+            if (methods.includes('google.com') && !methods.includes('password')) {
+              isGoogleOnly = true;
+            }
+          } catch {}
+
+          if (!isGoogleOnly) {
+            try {
+              const cached = localStorage.getItem(`smartledger_account_provider_${emailValue.toLowerCase()}`);
+              if (cached) {
+                const parsed = JSON.parse(cached);
+                if (parsed.providers?.includes('google.com') && !parsed.providers?.includes('password')) {
+                  isGoogleOnly = true;
+                }
+              }
+            } catch {}
           }
+
+          if (isGoogleOnly) {
+            setErrorDetails({
+              title: 'Google Sign-In Account',
+              message: 'This account uses Google Sign-In. Please continue with Google, or create a password from your account settings.',
+              actionType: 'continue_with_google',
+            });
+            setIsSubmitting(false);
+            return;
+          }
+
+          // Exact, clean error message (No "No Account Found or Password Incorrect" confusion!)
+          if (fbErr.code === 'auth/wrong-password' || fbErr.code === 'auth/invalid-credential') {
+            setErrorDetails({
+              title: 'Login Failed',
+              message: 'Email or password is incorrect.',
+            });
+            setIsSubmitting(false);
+            return;
+          }
+
+          if (fbErr.code === 'auth/user-not-found') {
+            setErrorDetails({
+              title: 'No Account Found',
+              message: `No account exists for "${emailOrPhone}". Click below to create an account in 1 click.`,
+              actionType: 'create_account',
+            });
+            setIsSubmitting(false);
+            return;
+          }
+
           const formatted = formatFirebaseErrorMessage(fbErr);
           setErrorDetails(formatted);
           setIsSubmitting(false);
@@ -243,6 +394,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }, 600);
 
       } else if (mode === 'forgot') {
+        // Secure, standard password reset flow
         if (!emailOrPhone.trim()) {
           setErrorDetails({
             title: 'Email Required',
@@ -253,46 +405,60 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }
 
         try {
-          if (emailValue.includes('@') && !emailValue.endsWith('@smartledger.app')) {
-            await sendPasswordResetEmail(auth, emailValue);
+          if (emailValue.includes('@')) {
+            const publicUrl = getAppPublicUrl();
+            try {
+              // Attempt to direct the reset link back to the custom/canonical app URL
+              await sendPasswordResetEmail(auth, emailValue, {
+                url: publicUrl,
+                handleCodeInApp: false,
+              });
+            } catch {
+              // Fallback to standard Firebase reset flow if custom domain is not yet verified in console
+              await sendPasswordResetEmail(auth, emailValue);
+            }
           }
-          setSuccessMessage('✓ Password reset link sent if an account matches this email.');
+          setSuccessMessage('✓ Password reset link sent! Check your email inbox for instructions to reset your password.');
         } catch (fbErr: any) {
-          setErrorDetails(formatFirebaseErrorMessage(fbErr));
+          if (fbErr.code === 'auth/invalid-email') {
+            setErrorDetails({
+              title: 'Invalid Email Format',
+              message: 'Please enter a valid email address (e.g. owner@business.com).',
+            });
+            setIsSubmitting(false);
+            return;
+          }
+
+          // Check if it's a Google-only account
+          let isGoogleOnly = false;
+          try {
+            const methods = await fetchSignInMethodsForEmail(auth, emailValue);
+            if (methods.includes('google.com') && !methods.includes('password')) {
+              isGoogleOnly = true;
+            }
+          } catch {}
+
+          if (isGoogleOnly) {
+            setErrorDetails({
+              title: 'Google Account',
+              message: 'This account uses Google Sign-In and does not have a password yet. Please continue with Google or set a password in Settings.',
+              actionType: 'continue_with_google',
+            });
+            setIsSubmitting(false);
+            return;
+          }
+
+          // Standard OWASP protection: show clean confirmation without revealing user existence
+          setSuccessMessage('✓ If an account matches this email, instructions to reset your password have been sent.');
         }
 
         setTimeout(() => {
           setIsSubmitting(false);
-          setMode('login');
-        }, 1500);
+        }, 1200);
       }
     } catch (err: any) {
       setErrorDetails(formatFirebaseErrorMessage(err));
       setIsSubmitting(false);
-    }
-  };
-
-  const handleGoogleSignIn = async () => {
-    setErrorDetails(null);
-    setIsSubmitting(true);
-    try {
-      const userCredential = await signInWithPopup(auth, googleProvider);
-      const user = userCredential.user;
-      setSuccessMessage(`✓ Signed in as ${user.displayName || user.email}!`);
-      setTimeout(() => {
-        setIsSubmitting(false);
-        triggerSuccess(
-          user.displayName || 'Business Owner',
-          user.email || '',
-          false,
-          user.uid
-        );
-        onClose();
-      }, 700);
-    } catch (err: any) {
-      setIsSubmitting(false);
-      const formatted = formatFirebaseErrorMessage(err);
-      setErrorDetails(formatted);
     }
   };
 
@@ -320,6 +486,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <BrandLogo size="sm" lightMode={true} tagline={false} />
             <button
               id="auth-modal-close-btn"
+              type="button"
               onClick={onClose}
               className="p-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
             >
@@ -343,7 +510,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div className="mb-5">
                     <h2 className="text-2xl font-bold text-slate-900 font-['Outfit',sans-serif]">Create your account</h2>
                     <p className="text-xs text-slate-500 mt-1">
-                      Your business records are isolated and encrypted in Cloud Firestore.
+                      Your business records are isolated and protected in Cloud Firestore.
                     </p>
                   </div>
                 )}
@@ -352,7 +519,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div className="mb-5">
                     <h2 className="text-2xl font-bold text-slate-900 font-['Outfit',sans-serif]">Welcome Back 👋</h2>
                     <p className="text-xs text-slate-500 mt-1">
-                      Log in to access your sales, debts, products, and reports.
+                      Log in to access your sales, debts, inventory, and reports.
                     </p>
                   </div>
                 )}
@@ -361,7 +528,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div className="mb-5">
                     <h2 className="text-2xl font-bold text-slate-900 font-['Outfit',sans-serif]">Reset Password</h2>
                     <p className="text-xs text-slate-500 mt-1">
-                      Enter your account email to receive reset instructions.
+                      Enter your registered email address to receive secure reset instructions.
                     </p>
                   </div>
                 )}
@@ -418,7 +585,49 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       </div>
                     </div>
 
-                    {/* Action button based on error type */}
+                    {/* Action button: Continue with Google */}
+                    {errorDetails.actionType === 'continue_with_google' && (
+                      <button
+                        type="button"
+                        onClick={handleGoogleSignIn}
+                        disabled={isSubmitting}
+                        className="w-full mt-2 py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-sm"
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
+                          <path
+                            fill="#ffffff"
+                            d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.34 0 3.26 2.64 1.26 6.58l4.02 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                          />
+                        </svg>
+                        <span>Continue with Google</span>
+                      </button>
+                    )}
+
+                    {/* Action button: Link Password Credential */}
+                    {errorDetails.actionType === 'link_password' && (
+                      <form onSubmit={handleVerifyAndLinkAccount} className="mt-2 space-y-2 pt-2 border-t border-red-200">
+                        <label className="block text-[11px] font-bold text-slate-800">
+                          Password for {linkingEmail}:
+                        </label>
+                        <input
+                          type="password"
+                          required
+                          placeholder="Enter your account password"
+                          value={linkingPassword}
+                          onChange={(e) => setLinkingPassword(e.target.value)}
+                          className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <button
+                          type="submit"
+                          disabled={isLinkingLoading}
+                          className="w-full py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <Lock className="w-3 h-3" />
+                          <span>{isLinkingLoading ? 'Verifying...' : 'Verify & Link Google Account'}</span>
+                        </button>
+                      </form>
+                    )}
+
                     {errorDetails.actionType === 'create_account' && (
                       <button
                         type="button"
@@ -441,54 +650,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       </button>
                     )}
 
-                    {errorDetails.actionType === 'enable_provider' && (
+                    {errorDetails.actionType === 'enable_provider' && isDevOrOwner && (
                       <div className="space-y-1.5 mt-2">
-                        {isDevOrOwner ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => setIsConsoleModalOpen(true)}
-                              className="w-full py-1.5 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                            >
-                              <Flame className="w-3.5 h-3.5 fill-white" />
-                              <span>Open Firebase Console Fix Guide</span>
-                            </button>
-                            {onContinueOffline && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  onContinueOffline(fullName || emailOrPhone || 'Business Owner');
-                                  onClose();
-                                }}
-                                className="w-full py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
-                              >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                <span>Bypass & Enter Workspace Instantly (Zero Setup)</span>
-                              </button>
-                            )}
-                          </>
-                        ) : (
-                          <p className="text-xs text-red-700 mt-1 font-medium text-center">
-                            Please check your credentials or try another sign-in method.
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    {errorDetails.actionType === 'authorize_domain' && (
-                      isDevOrOwner ? (
                         <button
                           type="button"
                           onClick={() => setIsConsoleModalOpen(true)}
-                          className="w-full mt-1.5 py-1.5 px-3 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                          className="w-full py-1.5 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                         >
-                          <span>How to Authorize Domain in Firebase</span>
+                          <Flame className="w-3.5 h-3.5 fill-white" />
+                          <span>Open Firebase Console Fix Guide</span>
                         </button>
-                      ) : (
-                        <p className="text-xs text-red-700 mt-1 font-medium text-center">
-                          Authentication service is verifying access. Please retry shortly.
-                        </p>
-                      )
+                      </div>
+                    )}
+
+                    {errorDetails.actionType === 'authorize_domain' && isDevOrOwner && (
+                      <button
+                        type="button"
+                        onClick={() => setIsConsoleModalOpen(true)}
+                        className="w-full mt-1.5 py-1.5 px-3 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <span>How to Authorize Domain in Firebase</span>
+                      </button>
                     )}
                   </div>
                 )}
@@ -513,47 +695,50 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                   <div>
                     <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1">
-                      Email or Phone
+                      {mode === 'forgot' ? 'Registered Email Address' : 'Email or Phone'}
                     </label>
                     <input
                       id="auth-email-phone"
-                      type="text"
+                      type={mode === 'forgot' ? 'email' : 'text'}
                       required
-                      placeholder="e.g. owner@business.com or 0788 123 456"
+                      placeholder={mode === 'forgot' ? 'e.g. owner@business.com' : 'e.g. owner@business.com or 0788 123 456'}
                       value={emailOrPhone}
                       onChange={(e) => setEmailOrPhone(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-xs sm:text-sm font-medium text-slate-900"
                     />
                   </div>
 
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600">
-                        {mode === 'forgot' ? 'New Password' : 'Password'}
-                      </label>
-                      {mode === 'login' && (
-                        <button
-                          type="button"
-                          id="auth-forgot-password-link"
-                          onClick={() => { setMode('forgot'); setErrorDetails(null); }}
-                          className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
-                        >
-                          Forgot Password?
-                        </button>
-                      )}
+                  {/* Password fields are NOT shown in forgot mode */}
+                  {mode !== 'forgot' && (
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600">
+                          Password
+                        </label>
+                        {mode === 'login' && (
+                          <button
+                            type="button"
+                            id="auth-forgot-password-link"
+                            onClick={() => { setMode('forgot'); setErrorDetails(null); }}
+                            className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
+                          >
+                            Forgot Password?
+                          </button>
+                        )}
+                      </div>
+                      <input
+                        id="auth-password"
+                        type="password"
+                        required
+                        placeholder="At least 6 characters"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-xs sm:text-sm font-medium text-slate-900"
+                      />
                     </div>
-                    <input
-                      id="auth-password"
-                      type="password"
-                      required
-                      placeholder="At least 6 characters"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-xs sm:text-sm font-medium text-slate-900"
-                    />
-                  </div>
+                  )}
 
-                  {(mode === 'signup' || mode === 'forgot') && (
+                  {mode === 'signup' && (
                     <div>
                       <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1">
                         Confirm password
@@ -579,7 +764,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <span>
                       {mode === 'signup' && (isSubmitting ? 'Creating Account...' : 'Create Account')}
                       {mode === 'login' && (isSubmitting ? 'Logging In...' : 'Log In')}
-                      {mode === 'forgot' && (isSubmitting ? 'Sending Link...' : 'Send Reset Link')}
+                      {mode === 'forgot' && (isSubmitting ? 'Sending Link...' : 'Send Password Reset Link')}
                     </span>
                     <ArrowRight className="w-4 h-4" />
                   </button>
@@ -623,7 +808,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </button>
                   )}
 
-                  {/* Firebase Console Connection Helper Link & Local Workspace Bypass (Restricted to Owner/Dev) */}
+                  {/* Firebase Console Connection Helper Link (Restricted to Owner/Dev) */}
                   {isDevOrOwner && (
                     <div className="pt-2 flex flex-col items-center gap-2">
                       <button
@@ -635,20 +820,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         <Flame className="w-3.5 h-3.5 text-amber-500" />
                         <span>Trouble logging in? Connect Firebase Console Guide</span>
                       </button>
-
-                      {onContinueOffline && (
-                        <button
-                          type="button"
-                          id="auth-continue-offline-btn"
-                          onClick={() => {
-                            onContinueOffline(fullName || emailOrPhone || 'Business Owner');
-                            onClose();
-                          }}
-                          className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer"
-                        >
-                          Or continue with Local Workspace (no login required)
-                        </button>
-                      )}
                     </div>
                   )}
                 </div>
@@ -662,10 +833,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       <FirebaseConsoleModal
         isOpen={isConsoleModalOpen}
         onClose={() => setIsConsoleModalOpen(false)}
-        onContinueOffline={onContinueOffline ? () => {
-          onContinueOffline(fullName || emailOrPhone || 'Business Owner');
-          onClose();
-        } : undefined}
       />
     </>
   );

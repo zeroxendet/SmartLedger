@@ -31,6 +31,9 @@ export interface BusinessProfile {
   isCashierModeEnabled?: boolean;
   taxRate?: number;
   createdAt: string;
+  currentPeriodId?: string;
+  currentPeriodStartedAt?: string;
+  periodNumber?: number;
 }
 
 export interface ProductVariant {
@@ -88,6 +91,9 @@ export interface Sale {
   customerName?: string;
   date: string; // ISO string
   notes?: string;
+  isVoided?: boolean;
+  voidedAt?: string;
+  voidedBy?: string;
 }
 
 export type ExpenseCategory = 
@@ -143,6 +149,8 @@ export interface Customer {
   amountOwed: number;
   dueDate?: string;
   createdAt: string;
+  isArchived?: boolean;
+  archivedAt?: string;
 }
 
 export interface Supplier {
@@ -152,6 +160,8 @@ export interface Supplier {
   amountOwed: number;
   productsSupplied?: string[];
   createdAt: string;
+  isArchived?: boolean;
+  archivedAt?: string;
 }
 
 export interface CustomerReturn {
@@ -263,6 +273,10 @@ export interface BusinessActivityLogEntry {
   customerName?: string;
   productName?: string;
   timestamp: string; // ISO string
+  relatedId?: string;
+  deletedBy?: string;
+  deletedAt?: string;
+  isVoided?: boolean;
 }
 
 export interface PurchaseOrderItem {
@@ -301,5 +315,42 @@ export interface TaxReportSummary {
   netTaxPayable: number;
   transactionsCount: number;
 }
+
+export interface ArchivedPeriodSummary {
+  totalSales: number;
+  totalProfit: number;
+  totalExpenses: number;
+  totalPurchases: number;
+  totalIncome: number;
+  productsCount: number;
+  customersCount: number;
+  suppliersCount: number;
+  salesCount: number;
+  expensesCount: number;
+  purchasesCount: number;
+}
+
+export interface ArchivedBusinessPeriod {
+  id: string;
+  periodNumber: number;
+  periodLabel: string;
+  startedAt: string;
+  archivedAt: string;
+  currency: CurrencyCode;
+  summary: ArchivedPeriodSummary;
+  products: Product[];
+  sales: Sale[];
+  expenses: Expense[];
+  purchases: Purchase[];
+  income: OtherIncome[];
+  customers: Customer[];
+  suppliers: Supplier[];
+  productionLogs: ProductionLog[];
+  wasteLogs: WasteLog[];
+  shifts: CashRegisterShift[];
+  customerReturns: CustomerReturn[];
+  activityLogs?: BusinessActivityLogEntry[];
+}
+
 
 

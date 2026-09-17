@@ -100,10 +100,14 @@ export function calculateDashboardMetrics(
   const otherIncomeToday = otherIncomeTodayList.reduce((acc, i) => acc + i.amount, 0);
 
   // Customer debt (Receivables)
-  const totalReceivables = customers.reduce((acc, c) => acc + (c.amountOwed || 0), 0);
+  const totalReceivables = customers
+    .filter((c) => !c.isArchived)
+    .reduce((acc, c) => acc + (c.amountOwed || 0), 0);
 
   // Supplier debt (Payables)
-  const totalPayables = suppliers.reduce((acc, s) => acc + (s.amountOwed || 0), 0);
+  const totalPayables = suppliers
+    .filter((s) => !s.isArchived)
+    .reduce((acc, s) => acc + (s.amountOwed || 0), 0);
 
   // Total inventory valuation
   const totalStockValue = products.reduce((acc, p) => acc + p.stock * p.buyingPrice, 0);

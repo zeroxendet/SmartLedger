@@ -8,6 +8,10 @@ import {
   onAuthStateChanged,
   GoogleAuthProvider,
   signInWithPopup,
+  fetchSignInMethodsForEmail,
+  linkWithCredential,
+  EmailAuthProvider,
+  updatePassword,
   User 
 } from 'firebase/auth';
 import { 
@@ -23,6 +27,9 @@ import {
   limit,
   onSnapshot,
   addDoc,
+  getDocs,
+  deleteDoc,
+  where,
   Firestore 
 } from 'firebase/firestore';
 import firebaseConfigData from '../firebase-applet-config.json';
@@ -38,7 +45,8 @@ import {
   ProductionLog, 
   WasteLog,
   NotificationItem,
-  BusinessActivityLogEntry
+  BusinessActivityLogEntry,
+  ArchivedBusinessPeriod
 } from './types';
 
 // Check if user has provided a custom Firebase console configuration
@@ -94,6 +102,7 @@ try {
   firestoreDb = initializeFirestore(
     app,
     {
+      ignoreUndefinedProperties: true,
       experimentalAutoDetectLongPolling: true,
       experimentalLongPollingOptions: {
         timeoutSeconds: 20,
@@ -106,6 +115,7 @@ try {
     firestoreDb = initializeFirestore(
       app,
       {
+        ignoreUndefinedProperties: true,
         experimentalForceLongPolling: true,
       },
       effectiveDatabaseId && effectiveDatabaseId !== '(default)' ? effectiveDatabaseId : undefined
@@ -122,6 +132,9 @@ export const db = firestoreDb;
 export interface UserWorkspaceData {
   userId: string;
   profile: BusinessProfile;
+  currentPeriodId?: string;
+  currentPeriodStartedAt?: string;
+  archivedPeriods?: ArchivedBusinessPeriod[];
   business: {
     name: string;
     type: string;
@@ -159,7 +172,7 @@ export interface UserWorkspaceData {
 export function formatFirebaseErrorMessage(error: any): { 
   title: string; 
   message: string; 
-  actionType?: 'enable_provider' | 'create_account' | 'login' | 'authorize_domain' | 'open_console' 
+  actionType?: 'enable_provider' | 'create_account' | 'login' | 'authorize_domain' | 'open_console' | 'continue_with_google'
 } {
   const code = error?.code || '';
   const rawMsg = error?.message || '';
@@ -172,10 +185,17 @@ export function formatFirebaseErrorMessage(error: any): {
     };
   }
 
-  if (code === 'auth/invalid-credential' || code === 'auth/user-not-found') {
+  if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
     return {
-      title: 'No Account Found or Password Incorrect',
-      message: 'We could not find a registered account with this email/phone, or the password was incorrect. If you are new, please create an account.',
+      title: 'Login Failed',
+      message: 'Email or password is incorrect.',
+    };
+  }
+
+  if (code === 'auth/user-not-found') {
+    return {
+      title: 'No Account Found',
+      message: 'No registered account was found with this email. Please check your spelling or create an account.',
       actionType: 'create_account'
     };
   }
@@ -188,10 +208,17 @@ export function formatFirebaseErrorMessage(error: any): {
     };
   }
 
-  if (code === 'auth/wrong-password') {
+  if (code === 'auth/too-many-requests') {
     return {
-      title: 'Incorrect Password',
-      message: 'The password entered does not match our records. Please try again or reset your password.',
+      title: 'Temporarily Locked Out',
+      message: 'Access to this account has been temporarily disabled due to many failed login attempts. Please reset your password or try again later.',
+    };
+  }
+
+  if (code === 'auth/user-disabled') {
+    return {
+      title: 'Account Disabled',
+      message: 'This user account has been disabled. Please contact support.',
     };
   }
 
@@ -242,6 +269,44 @@ export function formatFirebaseErrorMessage(error: any): {
     title: 'Authentication Error',
     message: rawMsg || 'An error occurred during authentication. Please check your credentials.',
   };
+}
+
+/**
+ * Creates or updates an Email/Password credential for the currently authenticated Firebase user.
+ * Links the EmailAuthProvider credential directly to the existing UID (never creates a second account).
+ */
+export async function createPasswordForCurrentUser(password: string): Promise<{ success: boolean; error?: any }> {
+  const user = auth.currentUser;
+  if (!user) {
+    return { success: false, error: { message: 'No authenticated user is currently signed in.' } };
+  }
+  if (!user.email) {
+    return { success: false, error: { message: 'This account does not have a verified email address.' } };
+  }
+
+  try {
+    const hasPasswordProvider = user.providerData.some((p) => p.providerId === 'password');
+    if (hasPasswordProvider) {
+      await updatePassword(user, password);
+    } else {
+      const credential = EmailAuthProvider.credential(user.email, password);
+      await linkWithCredential(user, credential);
+    }
+
+    // Update local provider registry cache for instant detection
+    try {
+      const providers = user.providerData.map((p) => p.providerId);
+      if (!providers.includes('password')) providers.push('password');
+      localStorage.setItem(
+        `smartledger_account_provider_${user.email.toLowerCase()}`,
+        JSON.stringify({ providers })
+      );
+    } catch {}
+
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error };
+  }
 }
 
 /**
@@ -375,8 +440,13 @@ export async function saveUserWorkspaceToFirestore(
   if (!userId) return { success: false, error: 'No userId provided' };
   try {
     const userDocRef = doc(db, 'users', userId);
+    // Sanitize payload to eliminate any undefined values that could violate Firestore specifications
+    const sanitizedData = JSON.parse(
+      JSON.stringify(workspaceData, (_, v) => (v === undefined ? null : v))
+    );
+
     const savePromise = setDoc(userDocRef, {
-      ...workspaceData,
+      ...sanitizedData,
       userId,
       lastSyncedAt: new Date().toISOString(),
     }, { merge: true });
@@ -392,6 +462,7 @@ export async function saveUserWorkspaceToFirestore(
     }
     return { success: true };
   } catch (error: any) {
+    console.error('Firestore saveUserWorkspace error:', error);
     return { success: false, error };
   }
 }
@@ -448,6 +519,39 @@ export async function logBusinessActivity(
 }
 
 /**
+ * Delete an individual activity log document by ID from Firestore
+ */
+export async function deleteBusinessActivityLog(userId: string, logId: string): Promise<boolean> {
+  if (!userId || !db || !logId) return false;
+  try {
+    const docRef = doc(db, 'users', userId, 'activity_log', logId);
+    await deleteDoc(docRef);
+    return true;
+  } catch (err) {
+    console.warn('deleteBusinessActivityLog note:', err);
+    return false;
+  }
+}
+
+/**
+ * Delete activity log documents matching a related transaction ID
+ */
+export async function deleteBusinessActivityLogsByRelatedId(userId: string, relatedId: string): Promise<boolean> {
+  if (!userId || !db || !relatedId) return false;
+  try {
+    const activityCol = collection(db, 'users', userId, 'activity_log');
+    const q = query(activityCol, where('relatedId', '==', relatedId));
+    const snapshot = await getDocs(q);
+    const deletePromises = snapshot.docs.map((d) => deleteDoc(d.ref));
+    await Promise.all(deletePromises);
+    return true;
+  } catch (err) {
+    console.warn('deleteBusinessActivityLogsByRelatedId note:', err);
+    return false;
+  }
+}
+
+/**
  * Real-time database listener (onSnapshot) on the user's isolated activity_log collection
  */
 export function subscribeToBusinessActivityLog(
@@ -483,6 +587,67 @@ export function subscribeToBusinessActivityLog(
     return unsubscribe;
   } catch (err) {
     return () => {};
+  }
+}
+
+/**
+ * Persist an archived business period snapshot to Firestore subcollection
+ */
+export async function archiveBusinessPeriodToFirestore(
+  userId: string,
+  period: ArchivedBusinessPeriod
+): Promise<{ success: boolean; error?: any }> {
+  if (!userId || !db) return { success: false, error: 'Database not available' };
+  try {
+    const periodDocRef = doc(db, 'users', userId, 'archived_periods', period.id);
+    const sanitizedPeriod = JSON.parse(
+      JSON.stringify(period, (_, v) => (v === undefined ? null : v))
+    );
+    await setDoc(periodDocRef, sanitizedPeriod);
+    return { success: true };
+  } catch (error) {
+    console.error('Firestore archiveBusinessPeriod error:', error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Fetch all archived periods from Firestore subcollection
+ */
+export async function fetchArchivedPeriodsFromFirestore(
+  userId: string
+): Promise<{ success: boolean; data?: ArchivedBusinessPeriod[]; error?: any }> {
+  if (!userId || !db) return { success: false, error: 'Database not available' };
+  try {
+    const periodsCol = collection(db, 'users', userId, 'archived_periods');
+    const q = query(periodsCol, orderBy('archivedAt', 'desc'));
+    const snapshot = await getDocs(q);
+    const periods: ArchivedBusinessPeriod[] = [];
+    snapshot.forEach((docSnap) => {
+      periods.push(docSnap.data() as ArchivedBusinessPeriod);
+    });
+    return { success: true, data: periods };
+  } catch (error) {
+    console.warn('Firestore fetchArchivedPeriods note:', error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Permanently delete an archived business period document from Firestore
+ */
+export async function deleteArchivedPeriodFromFirestore(
+  userId: string,
+  periodId: string
+): Promise<{ success: boolean; error?: any }> {
+  if (!userId || !db || !periodId) return { success: false, error: 'Database or period ID missing' };
+  try {
+    const periodDocRef = doc(db, 'users', userId, 'archived_periods', periodId);
+    await deleteDoc(periodDocRef);
+    return { success: true };
+  } catch (error) {
+    console.error('Firestore deleteArchivedPeriod error:', error);
+    return { success: false, error };
   }
 }
 

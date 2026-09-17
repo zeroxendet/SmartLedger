@@ -19,7 +19,11 @@ import {
   Unlock,
   FileSpreadsheet,
   RotateCcw,
-  Clock
+  Clock,
+  KeyRound,
+  ShieldCheck,
+  Share2,
+  Settings as SettingsIcon
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -32,6 +36,9 @@ interface DashboardViewProps {
   isCashierMode?: boolean;
   onUnlockCashierMode?: () => void;
   onLockCashierMode?: () => void;
+  onChangeCashierPin?: () => void;
+  onOpenShareApp?: () => void;
+  onOpenSettings?: () => void;
   onOpenPurchaseOrder?: () => void;
   onOpenShiftReconciliation?: () => void;
   onOpenReturns?: () => void;
@@ -55,6 +62,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   isCashierMode = false,
   onUnlockCashierMode,
   onLockCashierMode,
+  onChangeCashierPin,
+  onOpenShareApp,
+  onOpenSettings,
   onOpenPurchaseOrder,
   onOpenShiftReconciliation,
   onOpenReturns,
@@ -93,27 +103,79 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Lock className="w-5 h-5 text-slate-950" />
             </div>
             <div>
-              <span className="text-sm font-extrabold font-['Outfit',sans-serif]">
-                Cashier POS Mode (Staff Protected)
-              </span>
-              <p className="text-xs font-medium text-slate-900">
-                Reports, profit margins, and supplier debt are locked. Only register sales & inventory are active.
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-extrabold font-['Outfit',sans-serif]">
+                  Cashier POS Mode (Staff Protected)
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-950/15 text-slate-950 border border-slate-950/20">
+                  PIN Active
+                </span>
+              </div>
+              <p className="text-xs font-medium text-slate-900 mt-0.5">
+                Reports, profit margins, and supplier debt are locked. Cashiers can ring up sales and manage stock.
               </p>
             </div>
           </div>
-          {onUnlockCashierMode && (
-            <button
-              id="unlock-owner-mode-btn"
-              onClick={onUnlockCashierMode}
-              className="px-4 py-2 rounded-xl bg-slate-950 text-amber-400 text-xs font-extrabold hover:bg-slate-900 transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
-            >
-              <Unlock className="w-3.5 h-3.5" />
-              <span>Unlock Owner (PIN)</span>
-            </button>
-          )}
+
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            {onChangeCashierPin && (
+              <button
+                id="cashier-change-pin-btn"
+                onClick={onChangeCashierPin}
+                title="Change or set your custom 4-digit Cashier PIN"
+                className="flex-1 sm:flex-initial px-3 py-2 rounded-xl bg-slate-950/15 hover:bg-slate-950/25 text-slate-950 text-xs font-extrabold transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-950/20"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Choose PIN</span>
+              </button>
+            )}
+            {onUnlockCashierMode && (
+              <button
+                id="unlock-owner-mode-btn"
+                onClick={onUnlockCashierMode}
+                className="flex-1 sm:flex-initial px-4 py-2 rounded-xl bg-slate-950 text-amber-400 text-xs font-extrabold hover:bg-slate-900 transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+              >
+                <Unlock className="w-3.5 h-3.5" />
+                <span>Unlock Owner</span>
+              </button>
+            )}
+          </div>
         </div>
       ) : (
-        <div className="flex justify-end">
+        <div className="flex items-center justify-end gap-2 flex-wrap">
+          {onOpenSettings && (
+            <button
+              id="dashboard-settings-btn"
+              onClick={onOpenSettings}
+              title="Business Settings & Restart Business"
+              className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+            >
+              <SettingsIcon className="w-3.5 h-3.5 text-slate-600" />
+              <span>Settings</span>
+            </button>
+          )}
+          {onOpenShareApp && (
+            <button
+              id="dashboard-share-app-btn"
+              onClick={onOpenShareApp}
+              title="Share app link or QR code with cashiers and staff"
+              className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer border border-indigo-200 shadow-xs"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              <span>Share App / Link</span>
+            </button>
+          )}
+          {onChangeCashierPin && (
+            <button
+              id="owner-set-cashier-pin-btn"
+              onClick={onChangeCashierPin}
+              title="Configure or change the 4-digit Cashier Protection PIN"
+              className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Set Cashier PIN</span>
+            </button>
+          )}
           {onLockCashierMode && (
             <button
               id="lock-cashier-mode-btn"
@@ -121,7 +183,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <Lock className="w-3.5 h-3.5 text-slate-500" />
-              <span>Switch to Cashier Mode</span>
+              <span>Switch to Cashier POS</span>
             </button>
           )}
         </div>
@@ -144,6 +206,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <span className="text-xs text-slate-400">&bull;</span>
             <span className="text-xs font-semibold text-slate-500">{profile.type}</span>
+            <span className="text-xs text-slate-400">&bull;</span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+              Period #{profile.periodNumber || 1}
+            </span>
           </div>
         </div>
 
