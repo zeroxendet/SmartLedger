@@ -323,7 +323,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               const providers = userCredential.user.providerData.map((p) => p.providerId);
               localStorage.setItem(
                 `smartledger_account_provider_${userCredential.user.email.toLowerCase()}`,
-                JSON.stringify({ providers })
+                JSON.stringify({ 
+                  providers,
+                  hasPassword: providers.includes('password'),
+                  hasGoogle: providers.includes('google.com'),
+                  updatedAt: new Date().toISOString()
+                })
               );
             }
           } catch {}
@@ -352,7 +357,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           if (isGoogleOnly) {
             setErrorDetails({
               title: 'Google Sign-In Account',
-              message: 'This account uses Google Sign-In. Please continue with Google, or create a password from your account settings.',
+              message: 'Your account was created with Google. Continue with Google or set a password in Account Settings → Security.',
               actionType: 'continue_with_google',
             });
             setIsSubmitting(false);
@@ -404,6 +409,37 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           return;
         }
 
+        // Check if this account was created with Google and has no password credential
+        let isGoogleOnly = false;
+        try {
+          const methods = await fetchSignInMethodsForEmail(auth, emailValue);
+          if (methods.includes('google.com') && !methods.includes('password')) {
+            isGoogleOnly = true;
+          }
+        } catch {}
+
+        if (!isGoogleOnly) {
+          try {
+            const cached = localStorage.getItem(`smartledger_account_provider_${emailValue.toLowerCase()}`);
+            if (cached) {
+              const parsed = JSON.parse(cached);
+              if (parsed.providers?.includes('google.com') && !parsed.providers?.includes('password')) {
+                isGoogleOnly = true;
+              }
+            }
+          } catch {}
+        }
+
+        if (isGoogleOnly) {
+          setErrorDetails({
+            title: 'Google Sign-In Account',
+            message: 'Your account was created with Google and does not have a password yet. Continue with Google or set a password in Account Settings → Security.',
+            actionType: 'continue_with_google',
+          });
+          setIsSubmitting(false);
+          return;
+        }
+
         try {
           if (emailValue.includes('@')) {
             const publicUrl = getAppPublicUrl();
@@ -429,20 +465,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             return;
           }
 
-          // Check if it's a Google-only account
-          let isGoogleOnly = false;
-          try {
-            const methods = await fetchSignInMethodsForEmail(auth, emailValue);
-            if (methods.includes('google.com') && !methods.includes('password')) {
-              isGoogleOnly = true;
-            }
-          } catch {}
-
-          if (isGoogleOnly) {
+          if (fbErr.code === 'auth/user-not-found') {
             setErrorDetails({
-              title: 'Google Account',
-              message: 'This account uses Google Sign-In and does not have a password yet. Please continue with Google or set a password in Settings.',
-              actionType: 'continue_with_google',
+              title: 'No Account Found',
+              message: `No account exists for "${emailValue}". Please verify your email or create a new account.`,
+              actionType: 'create_account',
             });
             setIsSubmitting(false);
             return;

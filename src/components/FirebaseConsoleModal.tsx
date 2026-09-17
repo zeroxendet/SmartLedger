@@ -269,6 +269,20 @@ export const FirebaseConsoleModal: React.FC<FirebaseConsoleModalProps> = ({
                       To allow Google Sign-In and Password Resets on your production custom domain, add these to your Firebase Authorized Domains:
                     </p>
                     <div className="mt-2.5 flex flex-wrap gap-2">
+                      <div className="flex items-center gap-1.5 p-1.5 bg-amber-50 border border-amber-200 rounded-lg">
+                        <Flame className="w-3.5 h-3.5 text-amber-600 ml-1" />
+                        <code className="text-[11px] font-mono font-bold text-amber-900 select-all">
+                          smartledger-d0f9c.web.app
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy('smartledger-d0f9c.web.app', 'domain-hosting')}
+                          className="px-2 py-0.5 rounded bg-amber-200 hover:bg-amber-300 text-[10px] font-bold text-amber-900 cursor-pointer"
+                        >
+                          {copiedField === 'domain-hosting' ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+
                       <div className="flex items-center gap-1.5 p-1.5 bg-slate-50 border border-slate-200 rounded-lg">
                         <Globe className="w-3.5 h-3.5 text-emerald-600 ml-1" />
                         <code className="text-[11px] font-mono font-bold text-slate-900 select-all">
@@ -285,18 +299,18 @@ export const FirebaseConsoleModal: React.FC<FirebaseConsoleModalProps> = ({
 
                       <div className="flex items-center gap-1.5 p-1.5 bg-slate-50 border border-slate-200 rounded-lg">
                         <code className="text-[11px] font-mono text-slate-800 select-all ml-1">
-                          www.smartledger.rw
+                          smartledger-d0f9c.firebaseapp.com
                         </code>
                         <button
                           type="button"
-                          onClick={() => handleCopy('www.smartledger.rw', 'domain-www')}
+                          onClick={() => handleCopy('smartledger-d0f9c.firebaseapp.com', 'domain-app')}
                           className="px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-[10px] font-bold text-slate-700 cursor-pointer"
                         >
-                          {copiedField === 'domain-www' ? 'Copied' : 'Copy'}
+                          {copiedField === 'domain-app' ? 'Copied' : 'Copy'}
                         </button>
                       </div>
 
-                      {currentHost !== 'smartledger.rw' && (
+                      {currentHost !== 'smartledger.rw' && currentHost !== 'smartledger-d0f9c.web.app' && (
                         <div className="flex items-center gap-1.5 p-1.5 bg-slate-50 border border-slate-200 rounded-lg">
                           <code className="text-[11px] font-mono text-slate-600 select-all ml-1 max-w-[160px] truncate" title={currentHost}>
                             {currentHost}

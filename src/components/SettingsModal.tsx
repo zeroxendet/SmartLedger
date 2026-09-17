@@ -23,14 +23,24 @@ import {
   Globe,
   Copy,
   ExternalLink,
-  Server
+  Server,
+  Flame
 } from 'lucide-react';
 import { BusinessProfile, CurrencyCode, BusinessType, ArchivedBusinessPeriod } from '../types';
 import { formatCurrency } from '../utils/calculations';
-import { auth } from '../firebase';
+import { auth, linkGoogleToCurrentUser } from '../firebase';
 import { CreatePasswordModal } from './CreatePasswordModal';
 import { DeleteArchivedPeriodModal } from './DeleteArchivedPeriodModal';
-import { inspectDomainEnvironment, PRODUCTION_CUSTOM_DOMAIN, PRODUCTION_CUSTOM_DOMAIN_URL, FALLBACK_BACKUP_URL } from '../utils/domainConfig';
+import { 
+  inspectDomainEnvironment, 
+  PRODUCTION_CUSTOM_DOMAIN, 
+  PRODUCTION_CUSTOM_DOMAIN_URL, 
+  FIREBASE_PROJECT_ID,
+  FIREBASE_HOSTING_DOMAIN,
+  FIREBASE_HOSTING_URL,
+  FIREBASE_APP_DOMAIN,
+  FALLBACK_BACKUP_URL 
+} from '../utils/domainConfig';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -88,6 +98,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [taxRate, setTaxRate] = useState<number>(profile.taxRate ?? 0);
   const [isCreatePasswordOpen, setIsCreatePasswordOpen] = useState(false);
   const [passwordRefreshKey, setPasswordRefreshKey] = useState(0);
+  const [isLinkingGoogle, setIsLinkingGoogle] = useState(false);
+  const [linkGoogleMsg, setLinkGoogleMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
   if (!isOpen) return null;
 
@@ -723,6 +735,51 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         </button>
                       </div>
                     )}
+
+                    {hasPassword && !hasGoogle && (
+                      <div className="mt-2 p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-900 text-[11px] flex items-center justify-between gap-2">
+                        <span>
+                          💡 Link your Google account to log in with 1-click Google Sign-In alongside your password.
+                        </span>
+                        <button
+                          type="button"
+                          disabled={isLinkingGoogle}
+                          onClick={async () => {
+                            setLinkGoogleMsg(null);
+                            setIsLinkingGoogle(true);
+                            try {
+                              const res = await linkGoogleToCurrentUser();
+                              if (res.success) {
+                                setLinkGoogleMsg({ text: '✓ Google account linked successfully! You can now log in with either Google or your password.', isError: false });
+                                setPasswordRefreshKey((k) => k + 1);
+                              } else {
+                                const err = res.error;
+                                if (err?.code === 'auth/credential-already-in-use') {
+                                  setLinkGoogleMsg({ text: 'This Google account is already linked to another SmartLedger user. Linking was blocked to prevent overwriting business data.', isError: true });
+                                } else if (err?.code === 'auth/popup-closed-by-user') {
+                                  setLinkGoogleMsg({ text: 'Google popup was closed before completing linking.', isError: true });
+                                } else {
+                                  setLinkGoogleMsg({ text: err?.message || 'Failed to link Google account.', isError: true });
+                                }
+                              }
+                            } catch (e: any) {
+                              setLinkGoogleMsg({ text: e.message || 'Failed to link Google account.', isError: true });
+                            } finally {
+                              setIsLinkingGoogle(false);
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold whitespace-nowrap cursor-pointer transition-colors shadow-sm disabled:opacity-50"
+                        >
+                          {isLinkingGoogle ? 'Connecting...' : 'Link Google'}
+                        </button>
+                      </div>
+                    )}
+
+                    {linkGoogleMsg && (
+                      <div className={`p-2 rounded-xl text-[11px] ${linkGoogleMsg.isError ? 'bg-red-50 text-red-800 border border-red-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'}`}>
+                        {linkGoogleMsg.text}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -788,6 +845,64 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             return (
               <div className="space-y-6 animate-fade-in">
+                {/* Firebase Hosting Primary URL Card */}
+                <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-950 via-slate-900 to-slate-900 text-white shadow-lg space-y-4 border border-amber-500/30">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-400 shrink-0">
+                        <Flame className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-bold text-lg font-['Outfit',sans-serif]">Firebase Hosting URL</h4>
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold border border-amber-500/30 font-mono">
+                            {FIREBASE_PROJECT_ID}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-300 mt-0.5">
+                          High-speed global CDN deployment URL backed by Google Firebase
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => copyText(FIREBASE_HOSTING_URL, 'fb-hosting')}
+                      className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                    >
+                      {copiedDomainField === 'fb-hosting' ? (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5 text-slate-950" />
+                          <span>Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy Web.app URL</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="p-3 bg-white/5 border border-white/10 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <span className="text-xs text-amber-300/80 shrink-0">Hosting URL:</span>
+                      <code className="text-sm font-mono font-bold text-amber-400 truncate select-all">
+                        {FIREBASE_HOSTING_URL}
+                      </code>
+                    </div>
+                    <a
+                      href={FIREBASE_HOSTING_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-amber-200 hover:text-white flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      <span>Visit</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                </div>
+
                 {/* Domain Overview Card */}
                 <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 text-white shadow-lg space-y-4">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -904,6 +1019,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                   <div className="space-y-2 pt-1">
                     {[
+                      { domain: FIREBASE_HOSTING_DOMAIN, label: 'Firebase Hosting (Primary)' },
+                      { domain: FIREBASE_APP_DOMAIN, label: 'Firebase App Domain' },
                       { domain: 'smartledger.rw', label: 'Apex Domain' },
                       { domain: 'www.smartledger.rw', label: 'Subdomain' },
                       { domain: domainInfo.currentHostname, label: 'Active Deployment Host' }
@@ -998,6 +1115,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         onClose={() => setIsCreatePasswordOpen(false)}
         userEmail={auth.currentUser?.email || profile.email || profile.ownerEmailOrPhone || ''}
         hasExistingPassword={auth.currentUser?.providerData.some((p) => p.providerId === 'password') ?? false}
+        hasGoogle={auth.currentUser?.providerData.some((p) => p.providerId === 'google.com') ?? false}
         onPasswordCreated={() => {
           setPasswordRefreshKey((k) => k + 1);
         }}

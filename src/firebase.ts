@@ -10,6 +10,9 @@ import {
   signInWithPopup,
   fetchSignInMethodsForEmail,
   linkWithCredential,
+  linkWithPopup,
+  reauthenticateWithPopup,
+  reauthenticateWithCredential,
   EmailAuthProvider,
   updatePassword,
   User 
@@ -272,8 +275,90 @@ export function formatFirebaseErrorMessage(error: any): {
 }
 
 /**
+ * Reauthenticates the current user using Google Sign-In popup.
+ * Required by Firebase Auth prior to sensitive operations like linking an Email/Password credential.
+ */
+export async function reauthenticateWithGoogle(): Promise<{ success: boolean; error?: any; user?: User }> {
+  const user = auth.currentUser;
+  if (!user) {
+    return { success: false, error: { message: 'No authenticated user is currently signed in.' } };
+  }
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const result = await reauthenticateWithPopup(user, provider);
+    return { success: true, user: result.user };
+  } catch (error: any) {
+    return { success: false, error };
+  }
+}
+
+/**
+ * Reauthenticates the current user using their existing password credential.
+ */
+export async function reauthenticateWithPassword(currentPassword: string): Promise<{ success: boolean; error?: any; user?: User }> {
+  const user = auth.currentUser;
+  if (!user || !user.email) {
+    return { success: false, error: { message: 'No authenticated user with an email address is signed in.' } };
+  }
+  try {
+    const credential = EmailAuthProvider.credential(user.email, currentPassword);
+    const result = await reauthenticateWithCredential(user, credential);
+    return { success: true, user: result.user };
+  } catch (error: any) {
+    return { success: false, error };
+  }
+}
+
+/**
+ * Links a Google account directly to the currently signed in user.
+ * Preserves the exact same UID and all business records.
+ */
+export async function linkGoogleToCurrentUser(): Promise<{ success: boolean; error?: any; user?: User }> {
+  const user = auth.currentUser;
+  if (!user) {
+    return { success: false, error: { message: 'No authenticated user is currently signed in.' } };
+  }
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const result = await linkWithPopup(user, provider);
+    await user.reload();
+
+    if (user.email) {
+      const providers = user.providerData.map((p) => p.providerId);
+      localStorage.setItem(
+        `smartledger_account_provider_${user.email.toLowerCase()}`,
+        JSON.stringify({ 
+          providers, 
+          hasPassword: providers.includes('password'),
+          hasGoogle: true,
+          updatedAt: new Date().toISOString()
+        })
+      );
+
+      // Save auth provider flags to user's Firestore doc
+      try {
+        const userDocRef = doc(db, 'users', user.uid);
+        await setDoc(userDocRef, {
+          authProviders: providers,
+          hasGoogle: true,
+          hasPassword: providers.includes('password'),
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch {}
+    }
+
+    return { success: true, user: result.user };
+  } catch (error: any) {
+    return { success: false, error };
+  }
+}
+
+/**
  * Creates or updates an Email/Password credential for the currently authenticated Firebase user.
  * Links the EmailAuthProvider credential directly to the existing UID (never creates a second account).
+ * Never stores raw passwords in localStorage, database, or application state.
  */
 export async function createPasswordForCurrentUser(password: string): Promise<{ success: boolean; error?: any }> {
   const user = auth.currentUser;
@@ -281,7 +366,7 @@ export async function createPasswordForCurrentUser(password: string): Promise<{ 
     return { success: false, error: { message: 'No authenticated user is currently signed in.' } };
   }
   if (!user.email) {
-    return { success: false, error: { message: 'This account does not have a verified email address.' } };
+    return { success: false, error: { message: 'This account does not have an associated email address.' } };
   }
 
   try {
@@ -293,14 +378,31 @@ export async function createPasswordForCurrentUser(password: string): Promise<{ 
       await linkWithCredential(user, credential);
     }
 
-    // Update local provider registry cache for instant detection
+    await user.reload();
+
+    // Update local provider registry cache for instant detection across all components
     try {
       const providers = user.providerData.map((p) => p.providerId);
       if (!providers.includes('password')) providers.push('password');
       localStorage.setItem(
         `smartledger_account_provider_${user.email.toLowerCase()}`,
-        JSON.stringify({ providers })
+        JSON.stringify({
+          providers,
+          hasPassword: true,
+          hasGoogle: providers.includes('google.com'),
+          updatedAt: new Date().toISOString()
+        })
       );
+    } catch {}
+
+    // Also persist provider state in Firestore user doc
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      await setDoc(userDocRef, {
+        hasPassword: true,
+        authProviders: user.providerData.map((p) => p.providerId),
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
     } catch {}
 
     return { success: true };
