@@ -12,8 +12,36 @@ import {
   WasteLog,
   CustomerReturn,
   CashRegisterShift,
-  ArchivedBusinessPeriod
+  ArchivedBusinessPeriod,
+  StaffMember,
+  StaffRole,
+  StaffPermissions,
+  StaffSession,
+  SaleCorrectionRequest,
+  StaffActivityLogEntry
 } from './types';
+import {
+  getStoredStaffMembers,
+  saveStoredStaffMembers,
+  getStaffSession,
+  saveStaffSession,
+  clearStaffSession,
+  isStaffModeActive,
+  getStoredCorrectionRequests,
+  saveStoredCorrectionRequests,
+  getStoredStaffActivityLogs,
+  logStaffActivity,
+  seedInitialStaffMembers,
+  hasStaffPermission,
+  createStaffMemberWithPin,
+  verifyStaffPin,
+  unlockStaffSession,
+  parseStaffInviteFromUrl
+} from './utils/staffSecurity';
+import { StaffManagementModal } from './components/StaffManagementModal';
+import { StaffModeView } from './components/StaffModeView';
+import { StaffLockModal } from './components/StaffLockModal';
+import { SaleCorrectionModal } from './components/SaleCorrectionModal';
 import { SplashScreen } from './components/SplashScreen';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { AuthModal } from './components/AuthModal';
@@ -40,6 +68,7 @@ import { ShareAppModal } from './components/ShareAppModal';
 import { SettingsModal } from './components/SettingsModal';
 import { RestartBusinessModal } from './components/RestartBusinessModal';
 import { ArchivedPeriodDetailsModal } from './components/ArchivedPeriodDetailsModal';
+import { ReceiptModal } from './components/ReceiptModal';
 import { BottomNavBar } from './components/BottomNavBar';
 import { SessionLockScreen } from './components/SessionLockScreen';
 import { 
@@ -51,6 +80,7 @@ import {
   clearBackgroundTimestamp,
   recordUserActiveTimestamp,
   clearSessionLockStorage,
+  evaluateSessionOnReturn,
   STORAGE_KEYS
 } from './utils/sessionLock';
 
@@ -78,7 +108,8 @@ import {
   Share2,
   Settings as SettingsIcon,
   Archive,
-  ShieldCheck
+  ShieldCheck,
+  ShieldAlert
 } from 'lucide-react';
 import { 
   auth, 
@@ -119,8 +150,16 @@ export function App() {
   const [isWizardOpen, setIsWizardOpen] = useState<boolean>(false);
   const [wizardUser, setWizardUser] = useState<{ name: string; email: string }>({ name: '', email: '' });
 
-  // Main navigation tab
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'products' | 'customers' | 'suppliers' | 'reports' | 'feed'>('dashboard');
+  // Main navigation tab with resilient persistence across reloads & session unlocks
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'products' | 'customers' | 'suppliers' | 'reports' | 'feed'>(() => {
+    try {
+      const saved = localStorage.getItem('smartledger_last_active_tab');
+      if (saved && ['dashboard', 'products', 'customers', 'suppliers', 'reports', 'feed'].includes(saved)) {
+        return saved as any;
+      }
+    } catch {}
+    return 'dashboard';
+  });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // Business Data States (Strictly isolated per user, 0 demo records)
@@ -168,6 +207,68 @@ export function App() {
   const [isRestartBusinessOpen, setIsRestartBusinessOpen] = useState<boolean>(false);
   const [selectedArchivedPeriod, setSelectedArchivedPeriod] = useState<ArchivedBusinessPeriod | null>(null);
 
+  // Staff Management & Limited Access System State
+  const [staffList, setStaffList] = useState<StaffMember[]>(() => {
+    const bizId = effectiveUserId || 'default_biz';
+    return getStoredStaffMembers(bizId);
+  });
+  const [staffSession, setStaffSession] = useState<StaffSession | null>(() => {
+    return getStaffSession();
+  });
+  const [isStaffManagementOpen, setIsStaffManagementOpen] = useState<boolean>(false);
+  const [isStaffLockModalOpen, setIsStaffLockModalOpen] = useState<boolean>(false);
+  const [activeStaffCandidate, setActiveStaffCandidate] = useState<StaffMember | null>(null);
+  const [isSaleCorrectionOpen, setIsSaleCorrectionOpen] = useState<boolean>(false);
+  const [selectedSaleForCorrection, setSelectedSaleForCorrection] = useState<Sale | null>(null);
+  const [staffAccessToast, setStaffAccessToast] = useState<string | null>(null);
+  const [isReceiptModalOpen, setIsReceiptModalOpen] = useState<boolean>(false);
+  const [selectedReceiptSale, setSelectedReceiptSale] = useState<Sale | null>(null);
+
+  const handleUpdateStaffList = (updated: StaffMember[]) => {
+    setStaffList(updated);
+    saveStoredStaffMembers(profile?.id || effectiveUserId || 'default_biz', updated);
+  };
+
+  const [correctionRequests, setCorrectionRequests] = useState<SaleCorrectionRequest[]>(() => {
+    const bizId = effectiveUserId || 'default_biz';
+    return getStoredCorrectionRequests(bizId);
+  });
+
+  const [staffActivityLogs, setStaffActivityLogs] = useState<StaffActivityLogEntry[]>(() => {
+    const bizId = effectiveUserId || 'default_biz';
+    return getStoredStaffActivityLogs(bizId);
+  });
+
+  // Detect staff invite in URL on app startup
+  useEffect(() => {
+    const invite = parseStaffInviteFromUrl();
+    if (!invite || !invite.token) return;
+
+    const bizId = invite.businessId || profile?.id || effectiveUserId || 'default_biz';
+    const currentStaffList = staffList.length > 0 ? staffList : getStoredStaffMembers(bizId);
+
+    // Look for matching staff member in list by accessToken or id
+    let matched: StaffMember | undefined = currentStaffList.find(
+      (s) => s.accessToken === invite.token || (invite.staffCandidate && s.id === invite.staffCandidate.id)
+    );
+
+    // If not found in local list but decoded payload provided it
+    if (!matched && invite.staffCandidate && invite.staffCandidate.id && invite.staffCandidate.name) {
+      matched = invite.staffCandidate as StaffMember;
+    }
+
+    if (matched) {
+      if (matched.status === 'DISABLED') {
+        setStaffAccessToast(`Access Denied: Staff account for "${matched.name}" has been disabled by the owner.`);
+      } else {
+        setActiveStaffCandidate(matched);
+        setIsStaffLockModalOpen(true);
+      }
+    } else {
+      setStaffAccessToast('Staff invite link is invalid or expired. Please ask the business owner for a new link.');
+    }
+  }, [staffList, effectiveUserId, profile?.id]);
+
   // Secure Automatic Session Lock State (5-minute background / idle timeout)
   const [isSessionLocked, setIsSessionLocked] = useState<boolean>(() => {
     return checkShouldSessionLock();
@@ -182,6 +283,10 @@ export function App() {
     const localId = 'local_user_default';
     setActiveUserId(localId);
     localStorage.setItem('smartledger_active_uid', localId);
+    setIsSessionLocked(false);
+    setSessionLockedState(false);
+    clearBackgroundTimestamp();
+    recordUserActiveTimestamp();
     const storage = userScopedStorage(localId);
     const existing = storage.getProfile();
     if (existing && existing.name) {
@@ -210,6 +315,8 @@ export function App() {
   };
 
   const clearLocalState = () => {
+    clearSessionLockStorage();
+    setIsSessionLocked(false);
     setProfile(null);
     setProducts([]);
     setSales([]);
@@ -272,8 +379,10 @@ export function App() {
         setIsWizardOpen(false);
       }
 
-      // 2. Fetch latest data from Firestore
-      const res = await fetchUserWorkspaceFromFirestore(uid);
+      // 2. Fetch latest data from Firestore (only when authenticated as matching user)
+      const res = (auth.currentUser && auth.currentUser.uid === uid && !uid.startsWith('local_'))
+        ? await fetchUserWorkspaceFromFirestore(uid)
+        : { success: false, error: 'unauthenticated' };
 
       if (res.success && res.data && res.data.profile) {
         const ws = res.data;
@@ -338,26 +447,31 @@ export function App() {
         setWasteLogs(finalWasteLogs);
         storage.saveWasteLogs(finalWasteLogs);
 
-        // Fetch and merge archived periods
-        try {
-          const archivedRes = await fetchArchivedPeriodsFromFirestore(uid);
-          if (archivedRes.success && archivedRes.data && archivedRes.data.length > 0) {
-            const archMap = new Map<string, ArchivedBusinessPeriod>();
-            archivedRes.data.forEach((p) => archMap.set(p.id, p));
-            localArchived.forEach((p) => {
-              if (!archMap.has(p.id)) archMap.set(p.id, p);
-            });
-            const mergedArchived = Array.from(archMap.values()).sort((a, b) => 
-              new Date(b.archivedAt).getTime() - new Date(a.archivedAt).getTime()
-            );
-            setArchivedPeriods(mergedArchived);
-            storage.saveArchivedPeriods(mergedArchived);
-          } else if (ws.archivedPeriods && ws.archivedPeriods.length > 0) {
-            setArchivedPeriods(ws.archivedPeriods);
-            storage.saveArchivedPeriods(ws.archivedPeriods);
+        // Fetch and merge archived periods (only if authenticated with matching UID)
+        if (auth.currentUser && auth.currentUser.uid === uid && !uid.startsWith('local_')) {
+          try {
+            const archivedRes = await fetchArchivedPeriodsFromFirestore(uid);
+            if (archivedRes.success && archivedRes.data && archivedRes.data.length > 0) {
+              const archMap = new Map<string, ArchivedBusinessPeriod>();
+              archivedRes.data.forEach((p) => archMap.set(p.id, p));
+              localArchived.forEach((p) => {
+                if (!archMap.has(p.id)) archMap.set(p.id, p);
+              });
+              const mergedArchived = Array.from(archMap.values()).sort((a, b) => 
+                new Date(b.archivedAt).getTime() - new Date(a.archivedAt).getTime()
+              );
+              setArchivedPeriods(mergedArchived);
+              storage.saveArchivedPeriods(mergedArchived);
+            } else if (ws.archivedPeriods && ws.archivedPeriods.length > 0) {
+              setArchivedPeriods(ws.archivedPeriods);
+              storage.saveArchivedPeriods(ws.archivedPeriods);
+            }
+          } catch (e) {
+            console.warn('Could not fetch archived periods from Firestore:', e);
           }
-        } catch (e) {
-          console.warn('Could not fetch archived periods from Firestore:', e);
+        } else if (ws.archivedPeriods && ws.archivedPeriods.length > 0) {
+          setArchivedPeriods(ws.archivedPeriods);
+          storage.saveArchivedPeriods(ws.archivedPeriods);
         }
 
         storage.saveProfile(ws.profile);
@@ -509,101 +623,76 @@ export function App() {
   useEffect(() => {
     if (!isAuthenticated || !profile) return;
 
-    // Handle visibility changes (browser tab switch, minimize, switching to other phone apps)
+    // Handle visibility changes (browser tab switch, minimize, phone sleep/lock, switching to other apps)
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         recordBackgroundTimestamp();
       } else if (document.visibilityState === 'visible') {
-        if (checkShouldSessionLock()) {
-          setIsSessionLocked(true);
-          setSessionLockedState(true);
-        } else {
-          clearBackgroundTimestamp();
-        }
+        const { shouldLock } = evaluateSessionOnReturn();
+        setIsSessionLocked(shouldLock);
       }
     };
 
-    // Handle window blur & focus
-    const handleWindowBlur = () => {
-      recordBackgroundTimestamp();
-    };
-
-    const handleWindowFocus = () => {
-      if (checkShouldSessionLock()) {
-        setIsSessionLocked(true);
-        setSessionLockedState(true);
-      } else {
-        clearBackgroundTimestamp();
-      }
-    };
-
-    // Mobile specific lifecycle: pagehide & pageshow
+    // Mobile & PWA lifecycle: pagehide & pageshow
     const handlePageHide = () => {
       recordBackgroundTimestamp();
     };
 
     const handlePageShow = () => {
-      if (checkShouldSessionLock()) {
-        setIsSessionLocked(true);
-        setSessionLockedState(true);
-      } else {
-        clearBackgroundTimestamp();
-      }
+      const { shouldLock } = evaluateSessionOnReturn();
+      setIsSessionLocked(shouldLock);
     };
 
-    // Track user activity to prevent idle lock while user is actively working
+    // Track active user interactions to refresh active session timestamp
     let lastActivityLog = 0;
     const handleUserActivity = () => {
       const now = Date.now();
-      if (now - lastActivityLog > 5000) {
+      if (now - lastActivityLog > 3000) {
         lastActivityLog = now;
         recordUserActiveTimestamp();
       }
     };
 
-    // Regular interval to lock session if left unattended while foregrounded
+    // Periodic check (every 5 seconds) to lock session if left unattended while foregrounded
     const idleCheckInterval = setInterval(() => {
-      if (checkShouldSessionLock()) {
-        setIsSessionLocked(true);
-        setSessionLockedState(true);
+      if (document.visibilityState === 'visible') {
+        const { shouldLock } = evaluateSessionOnReturn();
+        if (shouldLock) {
+          setIsSessionLocked(true);
+        }
       }
-    }, 10000);
+    }, 5000);
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('blur', handleWindowBlur);
-    window.addEventListener('focus', handleWindowFocus);
     window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('pointerdown', handleUserActivity);
     window.addEventListener('keydown', handleUserActivity);
     window.addEventListener('touchstart', handleUserActivity);
     window.addEventListener('scroll', handleUserActivity, { passive: true });
+    window.addEventListener('mousemove', handleUserActivity, { passive: true });
 
-    // Initial check
-    if (checkShouldSessionLock()) {
-      setIsSessionLocked(true);
-      setSessionLockedState(true);
-    } else {
-      recordUserActiveTimestamp();
-    }
+    // Initial check upon mount
+    const { shouldLock: initialShouldLock } = evaluateSessionOnReturn();
+    setIsSessionLocked(initialShouldLock);
 
     return () => {
       clearInterval(idleCheckInterval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('blur', handleWindowBlur);
-      window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('pointerdown', handleUserActivity);
       window.removeEventListener('keydown', handleUserActivity);
       window.removeEventListener('touchstart', handleUserActivity);
       window.removeEventListener('scroll', handleUserActivity);
+      window.removeEventListener('mousemove', handleUserActivity);
     };
   }, [isAuthenticated, profile]);
 
   const handleUnlockSession = () => {
     setIsSessionLocked(false);
     setSessionLockedState(false);
+    clearBackgroundTimestamp();
     recordUserActiveTimestamp();
   };
 
@@ -620,6 +709,10 @@ export function App() {
     userId?: string
   ) => {
     setIsAuthModalOpen(false);
+    setIsSessionLocked(false);
+    setSessionLockedState(false);
+    clearBackgroundTimestamp();
+    recordUserActiveTimestamp();
     const targetUid = userId || currentUser?.uid || auth.currentUser?.uid || `user_${Date.now()}`;
     setActiveUserId(targetUid);
     localStorage.setItem('smartledger_active_uid', targetUid);
@@ -820,12 +913,34 @@ export function App() {
 
   // Business Action Handlers
   const handleCompleteSale = (sale: Sale, restockIfProduced = 0) => {
-    setSales((prev) => [sale, ...prev]);
+    const enhancedSale: Sale = {
+      ...sale,
+      staffId: staffSession?.staffId || sale.staffId,
+      staffName: staffSession?.staffName || sale.staffName,
+    };
+    setSales((prev) => [enhancedSale, ...prev]);
+
+    // Log staff activity if recorded during active staff session
+    if (staffSession) {
+      const bizId = profile?.id || effectiveUserId || 'default_biz';
+      const itemsSummary = enhancedSale.items?.map((i) => `${i.quantity}x ${i.productName}`).join(', ') || 'Items sold';
+      const newLog = logStaffActivity(bizId, {
+        staffId: staffSession.staffId,
+        staffName: staffSession.staffName,
+        staffRole: staffSession.role,
+        action: 'sale_recorded',
+        title: 'Recorded Sale',
+        details: `${itemsSummary} (${enhancedSale.paymentMethod})`,
+        amount: enhancedSale.totalAmount,
+        paymentMethod: enhancedSale.paymentMethod,
+      });
+      setStaffActivityLogs((prev) => [newLog, ...prev]);
+    }
 
     // Update Product Stock
     setProducts((prev) =>
       prev.map((p) => {
-        const item = sale.items.find((i) => i.productId === p.id);
+        const item = enhancedSale.items.find((i) => i.productId === p.id);
         if (item) {
           const newStock = p.stock + restockIfProduced - item.quantity;
           return { ...p, stock: Math.max(0, newStock) };
@@ -836,7 +951,7 @@ export function App() {
 
     // If produced extra on the fly, log production
     if (restockIfProduced > 0) {
-      const firstItem = sale.items[0];
+      const firstItem = enhancedSale.items[0];
       if (firstItem) {
         setProductionLogs((prev) => [
           {
@@ -853,11 +968,11 @@ export function App() {
     }
 
     // Update Customer Debt if Credit sale
-    if (sale.paymentMethod === 'Credit' && sale.customerId) {
+    if (enhancedSale.paymentMethod === 'Credit' && enhancedSale.customerId) {
       setCustomers((prev) =>
         prev.map((c) =>
-          c.id === sale.customerId
-            ? { ...c, amountOwed: (c.amountOwed || 0) + sale.totalAmount }
+          c.id === enhancedSale.customerId
+            ? { ...c, amountOwed: (c.amountOwed || 0) + enhancedSale.totalAmount }
             : c
         )
       );
@@ -865,19 +980,274 @@ export function App() {
 
     // Real-Time Activity Log entry for live feed
     if (currentUser) {
-      const itemsList = sale.items.map((i) => `${i.quantity} ${i.productName}`).join(', ');
-      const customer = sale.customerName || 'Customer';
+      const itemsList = enhancedSale.items.map((i) => `${i.quantity} ${i.productName}`).join(', ');
+      const customer = enhancedSale.customerName || 'Customer';
       logBusinessActivity(currentUser.uid, {
         workspaceId: currentUser.uid,
         type: 'sale',
-        title: `Sold ${itemsList} to ${customer} (+${formatCurrency(sale.totalAmount, profile?.currency || 'RWF')})`,
-        subtitle: `Payment: ${sale.paymentMethod} • Invoice #${sale.invoiceNumber}`,
-        amount: sale.totalAmount,
-        quantity: sale.items.reduce((acc, i) => acc + i.quantity, 0),
+        title: `Sold ${itemsList} to ${customer} (+${formatCurrency(enhancedSale.totalAmount, profile?.currency || 'RWF')})`,
+        subtitle: `Payment: ${enhancedSale.paymentMethod} • Invoice #${enhancedSale.invoiceNumber}${enhancedSale.staffName ? ` • Staff: ${enhancedSale.staffName}` : ''}`,
+        amount: enhancedSale.totalAmount,
+        quantity: enhancedSale.items.reduce((acc, i) => acc + i.quantity, 0),
         customerName: customer,
-        timestamp: sale.date || new Date().toISOString(),
+        timestamp: enhancedSale.date || new Date().toISOString(),
       });
     }
+  };
+
+  // Staff System Handlers (Owner-Controlled & Secure)
+  const handleSaveStaffMember = (member: StaffMember) => {
+    const bizId = profile?.id || effectiveUserId || 'default_biz';
+    setStaffList((prev) => {
+      const exists = prev.some((s) => s.id === member.id);
+      const updated = exists ? prev.map((s) => (s.id === member.id ? member : s)) : [...prev, member];
+      saveStoredStaffMembers(bizId, updated);
+      return updated;
+    });
+    // Log activity
+    const newLog = logStaffActivity(bizId, {
+      staffId: member.id,
+      staffName: member.name,
+      staffRole: member.role,
+      action: 'staff_updated',
+      title: 'Staff Profile Updated',
+      details: `${member.name} (${member.role}) saved with permissions`,
+    });
+    setStaffActivityLogs((prev) => [newLog, ...prev]);
+  };
+
+  const handleDeleteStaffMember = (staffId: string) => {
+    const bizId = profile?.id || effectiveUserId || 'default_biz';
+    const target = staffList.find((s) => s.id === staffId);
+    if (staffSession?.staffId === staffId) {
+      clearStaffSession();
+      setStaffSession(null);
+    }
+    setStaffList((prev) => {
+      const updated = prev.filter((s) => s.id !== staffId);
+      saveStoredStaffMembers(bizId, updated);
+      return updated;
+    });
+    if (target) {
+      const newLog = logStaffActivity(bizId, {
+        staffId: target.id,
+        staffName: target.name,
+        staffRole: target.role,
+        action: 'staff_removed',
+        title: 'Staff Member Removed',
+        details: `${target.name} was removed from staff. Historical transactions remain intact.`,
+      });
+      setStaffActivityLogs((prev) => [newLog, ...prev]);
+    }
+  };
+
+  const handleToggleStaffStatus = (staffId: string) => {
+    const bizId = profile?.id || effectiveUserId || 'default_biz';
+    setStaffList((prev) => {
+      const updated = prev.map((s) => {
+        if (s.id === staffId) {
+          const nextStatus = s.status === 'ACTIVE' ? ('DISABLED' as const) : ('ACTIVE' as const);
+          if (nextStatus === 'DISABLED' && staffSession?.staffId === staffId) {
+            clearStaffSession();
+            setStaffSession(null);
+            setStaffAccessToast(`Access for ${s.name} has been disabled.`);
+          }
+          const newLog = logStaffActivity(bizId, {
+            staffId: s.id,
+            staffName: s.name,
+            staffRole: s.role,
+            action: nextStatus === 'ACTIVE' ? 'staff_enabled' : 'staff_disabled',
+            title: `Staff ${nextStatus === 'ACTIVE' ? 'Enabled' : 'Disabled'}`,
+            details: `${s.name}'s access was set to ${nextStatus}`,
+          });
+          setStaffActivityLogs((prevLogs) => [newLog, ...prevLogs]);
+          return { ...s, status: nextStatus };
+        }
+        return s;
+      });
+      saveStoredStaffMembers(bizId, updated);
+      return updated;
+    });
+  };
+
+  const handleEnterStaffMode = (member: StaffMember) => {
+    if (member.status === 'DISABLED') {
+      setStaffAccessToast(`Cannot open staff session: ${member.name} is currently Disabled.`);
+      return;
+    }
+    setActiveStaffCandidate(member);
+    setIsStaffLockModalOpen(true);
+  };
+
+  const handleStaffUnlockSuccess = () => {
+    if (activeStaffCandidate) {
+      const session: StaffSession = {
+        staffId: activeStaffCandidate.id,
+        staffName: activeStaffCandidate.name,
+        role: activeStaffCandidate.role,
+        businessId: profile?.id || effectiveUserId || 'default_biz',
+        businessName: profile?.name || 'SmartLedger Store',
+        ownerId: activeStaffCandidate.ownerId || effectiveUserId || profile?.id || 'owner',
+        permissions: activeStaffCandidate.permissions,
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 12 * 3600 * 1000).toISOString(),
+        isLocked: false,
+      };
+      saveStaffSession(session);
+      setStaffSession(session);
+      setIsStaffLockModalOpen(false);
+      setIsSessionLocked(false);
+      setActiveTab('dashboard');
+
+      const bizId = profile?.id || effectiveUserId || 'default_biz';
+      const newLog = logStaffActivity(bizId, {
+        staffId: session.staffId,
+        staffName: session.staffName,
+        staffRole: session.role,
+        action: 'session_started',
+        title: 'Staff Shift Started',
+        details: `${session.staffName} unlocked workstation`,
+      });
+      setStaffActivityLogs((prev) => [newLog, ...prev]);
+
+      if (typeof window !== 'undefined' && window.location.search) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
+  };
+
+  const handleLockStaffMode = () => {
+    if (staffSession) {
+      const matched = staffList.find((s) => s.id === staffSession.staffId) || {
+        id: staffSession.staffId,
+        name: staffSession.staffName,
+        role: staffSession.role,
+        status: 'ACTIVE' as const,
+        cashierPinHash: '',
+        hasPin: true,
+        pinMasked: '••••',
+        permissions: staffSession.permissions,
+        businessId: staffSession.businessId,
+        businessName: staffSession.businessName,
+        ownerId: effectiveUserId || 'owner',
+        createdAt: new Date().toISOString(),
+        accessToken: '',
+      };
+      setActiveStaffCandidate(matched);
+      setIsStaffLockModalOpen(true);
+    }
+  };
+
+  const handleExitStaffMode = () => {
+    clearStaffSession();
+    setStaffSession(null);
+    setIsStaffLockModalOpen(false);
+    setActiveTab('dashboard');
+  };
+
+  const handleApproveCorrection = (request: SaleCorrectionRequest) => {
+    setSales((prev) =>
+      prev.map((s) => {
+        if (s.id === request.saleId) {
+          return {
+            ...s,
+            isVoided: true,
+            voidedBy: `Approved by Owner (Requested by ${request.staffName})`,
+            voidedAt: new Date().toISOString(),
+          };
+        }
+        return s;
+      })
+    );
+
+    const targetSale = sales.find((s) => s.id === request.saleId);
+    if (targetSale && targetSale.items) {
+      setProducts((prev) =>
+        prev.map((p) => {
+          const item = targetSale.items.find((i) => i.productId === p.id);
+          if (item) {
+            return { ...p, stock: p.stock + item.quantity };
+          }
+          return p;
+        })
+      );
+    }
+
+    if (targetSale?.paymentMethod === 'Credit' && targetSale.customerId) {
+      setCustomers((prev) =>
+        prev.map((c) =>
+          c.id === targetSale.customerId
+            ? { ...c, amountOwed: Math.max(0, (c.amountOwed || 0) - targetSale.totalAmount) }
+            : c
+        )
+      );
+    }
+
+    const bizId = profile?.id || effectiveUserId || 'default_biz';
+    const updatedRequests = correctionRequests.map((r) =>
+      r.id === request.id
+        ? {
+            ...r,
+            status: 'APPROVED' as const,
+            reviewedAt: new Date().toISOString(),
+            reviewedBy: profile?.ownerName || 'Owner',
+          }
+        : r
+    );
+    setCorrectionRequests(updatedRequests);
+    saveStoredCorrectionRequests(bizId, updatedRequests);
+
+    const newLog = logStaffActivity(bizId, {
+      staffId: request.staffId,
+      staffName: request.staffName,
+      staffRole: 'Cashier',
+      action: 'correction_approved',
+      title: 'Sale Correction Approved',
+      details: `Sale #${request.invoiceNumber} voided and stock restored.`,
+      amount: request.saleAmount,
+    });
+    setStaffActivityLogs((prev) => [newLog, ...prev]);
+  };
+
+  const handleRejectCorrection = (request: SaleCorrectionRequest, reviewerNotes?: string) => {
+    const bizId = profile?.id || effectiveUserId || 'default_biz';
+    const updatedRequests = correctionRequests.map((r) =>
+      r.id === request.id
+        ? {
+            ...r,
+            status: 'REJECTED' as const,
+            reviewedAt: new Date().toISOString(),
+            reviewedBy: profile?.ownerName || 'Owner',
+            reviewerNotes: reviewerNotes || 'Declined by Owner',
+          }
+        : r
+    );
+    setCorrectionRequests(updatedRequests);
+    saveStoredCorrectionRequests(bizId, updatedRequests);
+  };
+
+  const handleSubmitCorrectionRequest = (data: Omit<SaleCorrectionRequest, 'id' | 'requestedAt' | 'status'>) => {
+    const bizId = profile?.id || effectiveUserId || 'default_biz';
+    const newRequest: SaleCorrectionRequest = {
+      ...data,
+      id: `req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      requestedAt: new Date().toISOString(),
+      status: 'PENDING',
+    };
+    const updatedRequests = [newRequest, ...correctionRequests];
+    setCorrectionRequests(updatedRequests);
+    saveStoredCorrectionRequests(bizId, updatedRequests);
+
+    const newLog = logStaffActivity(bizId, {
+      staffId: data.staffId,
+      staffName: data.staffName,
+      staffRole: 'Cashier',
+      action: 'correction_requested',
+      title: 'Requested Sale Correction',
+      details: `Sale #${data.invoiceNumber}: ${data.reason}`,
+      amount: data.saleAmount,
+    });
+    setStaffActivityLogs((prev) => [newLog, ...prev]);
   };
 
   const handleAddExpense = (expense: Expense) => {
@@ -1622,6 +1992,24 @@ export function App() {
 
   // Cashier Mode Role Protection Handlers
   const handleNavigateTab = (targetTab: 'dashboard' | 'products' | 'customers' | 'suppliers' | 'reports' | 'feed') => {
+    recordUserActiveTimestamp();
+
+    // If active Staff Session, enforce role permissions:
+    if (staffSession) {
+      if (targetTab === 'reports' && !hasStaffPermission(staffSession, 'canViewReports')) {
+        setStaffAccessToast('Access Denied: Protected Owner Information. Cashiers cannot view business financial reports.');
+        return;
+      }
+      if (targetTab === 'suppliers' && !hasStaffPermission(staffSession, 'canManageSuppliers')) {
+        setStaffAccessToast('Access Denied: Protected Owner Information. Cashiers cannot view supplier balances.');
+        return;
+      }
+      if (targetTab === 'feed') {
+        setStaffAccessToast('Access Denied: Protected Owner Information. Real-time feed is restricted to Owner/Manager.');
+        return;
+      }
+    }
+
     if (isCashierMode && (targetTab === 'reports' || targetTab === 'feed')) {
       setPendingTabAfterUnlock(targetTab);
       setPinModalMode('unlock_owner');
@@ -1629,6 +2017,7 @@ export function App() {
       return;
     }
     setActiveTab(targetTab);
+    localStorage.setItem('smartledger_last_active_tab', targetTab);
   };
 
   const handleUnlockPinSuccess = (newPin?: string) => {
@@ -1659,6 +2048,7 @@ export function App() {
       localStorage.setItem('smartledger_is_cashier_mode', 'false');
       if (pendingTabAfterUnlock) {
         setActiveTab(pendingTabAfterUnlock);
+        localStorage.setItem('smartledger_last_active_tab', pendingTabAfterUnlock);
         setPendingTabAfterUnlock(null);
       }
     }
@@ -2356,6 +2746,40 @@ export function App() {
 
   // 4. Secure Automatic Session Lock Screen (Zero business data rendered in DOM while locked)
   if (isSessionLocked) {
+    if (staffSession) {
+      const activeStaff = staffList.find((s) => s.id === staffSession.staffId) || {
+        id: staffSession.staffId,
+        name: staffSession.staffName,
+        role: staffSession.role,
+        status: 'ACTIVE' as const,
+        cashierPinHash: '',
+        hasPin: true,
+        pinMasked: '••••',
+        permissions: staffSession.permissions,
+        businessId: staffSession.businessId,
+        businessName: staffSession.businessName,
+        ownerId: effectiveUserId || 'owner',
+        createdAt: new Date().toISOString(),
+        accessToken: '',
+      };
+      return (
+        <StaffLockModal
+          isOpen={true}
+          staff={activeStaff}
+          businessId={staffSession.businessId}
+          businessName={staffSession.businessName}
+          onUnlock={() => {
+            unlockStaffSession();
+            setIsSessionLocked(false);
+            setSessionLockedState(false);
+            clearBackgroundTimestamp();
+            recordUserActiveTimestamp();
+          }}
+          onExitStaffMode={handleExitStaffMode}
+        />
+      );
+    }
+
     return (
       <SessionLockScreen
         profile={profile}
@@ -2729,14 +3153,52 @@ export function App() {
 
       {/* Main Container Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 pb-24 md:pb-8 space-y-6">
-        {activeTab === 'dashboard' && (
-          <DashboardView
+        {staffAccessToast && (
+          <div className="p-4 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-950 flex items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2.5 text-xs font-semibold">
+              <ShieldAlert className="w-4 h-4 text-indigo-600 shrink-0" />
+              <span>{staffAccessToast}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setStaffAccessToast(null)}
+              className="text-xs font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {staffSession && !staffSession.isLocked ? (
+          <StaffModeView
+            session={staffSession}
+            products={products}
+            sales={sales}
+            customers={customers}
+            currency={profile.currency}
+            onOpenNewSale={() => setIsSellOpen(true)}
+            onOpenReceiptDetails={(sale) => {
+              setSelectedReceiptSale(sale);
+              setIsReceiptModalOpen(true);
+            }}
+            onRequestCorrection={(sale) => {
+              setSelectedSaleForCorrection(sale);
+              setIsSaleCorrectionOpen(true);
+            }}
+            onLockStaffMode={handleLockStaffMode}
+            onExitStaffMode={handleExitStaffMode}
+          />
+        ) : (
+          <>
+            {activeTab === 'dashboard' && (
+              <DashboardView
             profile={profile}
             products={products}
             sales={sales}
             expenses={expenses}
             customers={customers}
             suppliers={suppliers}
+            returns={returns}
             isCashierMode={isCashierMode}
             onUnlockCashierMode={() => {
               setPinModalMode('unlock_owner');
@@ -2826,6 +3288,7 @@ export function App() {
             expenses={expenses}
             customers={customers}
             suppliers={suppliers}
+            returns={returns}
             currency={profile.currency}
             isBeginner={profile.beginnerMode}
             onToggleBeginnerMode={handleToggleBeginnerMode}
@@ -2858,6 +3321,8 @@ export function App() {
             returns={returns}
             onDeleteRecord={handleDeleteMistakenRecord}
           />
+        )}
+          </>
         )}
       </main>
 
@@ -2940,6 +3405,14 @@ export function App() {
         expenses={expenses}
         customers={customers}
         suppliers={suppliers}
+        purchases={purchases}
+        returns={returns}
+        wasteLogs={wasteLogs}
+        onNavigateTab={handleNavigateTab}
+        onReviewSale={(_saleId) => {
+          setIsAIOpen(false);
+          handleNavigateTab('feed');
+        }}
       />
 
       {profile.isBakeryMode && (
@@ -3070,7 +3543,81 @@ export function App() {
         }}
         onOpenFirebaseConsole={() => setIsFirebaseConsoleModalOpen(true)}
         isDevOrOwner={isDevOrOwner}
+        staffList={staffList}
+        onOpenStaffManagement={() => setIsStaffManagementOpen(true)}
+        onToggleStaffStatus={handleToggleStaffStatus}
       />
+
+      {/* Staff Management Modal for Store Owner */}
+      <StaffManagementModal
+        isOpen={isStaffManagementOpen}
+        onClose={() => setIsStaffManagementOpen(false)}
+        businessId={profile?.id || effectiveUserId || 'default_biz'}
+        businessName={profile?.name || 'SmartLedger Store'}
+        ownerId={effectiveUserId || profile?.id || 'owner'}
+        currency={profile.currency}
+        staffList={staffList}
+        onUpdateStaffList={handleUpdateStaffList}
+        correctionRequests={correctionRequests}
+        onApproveCorrection={handleApproveCorrection}
+        onRejectCorrection={handleRejectCorrection}
+        activityLogs={staffActivityLogs}
+      />
+
+      {/* Staff Lock / Unlock Modal for Shift Station */}
+      <StaffLockModal
+        isOpen={isStaffLockModalOpen}
+        onClose={() => {
+          setIsStaffLockModalOpen(false);
+          setActiveStaffCandidate(null);
+        }}
+        staff={activeStaffCandidate}
+        businessId={profile?.id || effectiveUserId || 'default_biz'}
+        businessName={profile?.name || 'SmartLedger Store'}
+        onUnlock={handleStaffUnlockSuccess}
+        onExitStaffMode={() => {
+          setIsStaffLockModalOpen(false);
+          setActiveStaffCandidate(null);
+        }}
+      />
+
+      {/* Sale Correction Request Modal for Staff */}
+      {selectedSaleForCorrection && (
+        <SaleCorrectionModal
+          isOpen={isSaleCorrectionOpen}
+          onClose={() => {
+            setIsSaleCorrectionOpen(false);
+            setSelectedSaleForCorrection(null);
+          }}
+          sale={selectedSaleForCorrection}
+          currency={profile.currency}
+          staffSession={staffSession}
+          businessId={profile?.id || effectiveUserId || 'default_biz'}
+          onSubmitRequest={(request) => {
+            const updated = [request, ...correctionRequests];
+            setCorrectionRequests(updated);
+            saveStoredCorrectionRequests(profile?.id || effectiveUserId || 'default_biz', updated);
+            setIsSaleCorrectionOpen(false);
+            setSelectedSaleForCorrection(null);
+            setStaffAccessToast('Sale correction request submitted to store owner for review.');
+          }}
+        />
+      )}
+
+      {/* Thermal & Digital Receipt Modal for Staff and Owner */}
+      {selectedReceiptSale && (
+        <ReceiptModal
+          isOpen={isReceiptModalOpen}
+          onClose={() => {
+            setIsReceiptModalOpen(false);
+            setSelectedReceiptSale(null);
+          }}
+          sale={selectedReceiptSale}
+          profile={profile}
+          currency={profile.currency}
+          customers={customers}
+        />
+      )}
 
       {/* Secure Restart Business Confirmation Modal */}
       <RestartBusinessModal

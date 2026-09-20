@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { Product, Sale, Expense, Customer, Supplier, CurrencyCode } from '../types';
+import { Product, Sale, Expense, Customer, Supplier, CurrencyCode, CustomerReturn } from '../types';
 import { formatCurrency, calculateDashboardMetrics } from '../utils/calculations';
 import { exportSalesData, exportExpensesData } from '../utils/exportUtils';
 import { ProductSalesHistory7Days } from './ProductSalesHistory7Days';
 import { TaxSummaryReport } from './TaxSummaryReport';
+import { PaymentMethodSalesReport } from './PaymentMethodSalesReport';
 import { 
   TrendingUp, 
   Activity, 
@@ -17,7 +18,8 @@ import {
   ShoppingBag,
   Sparkles,
   ReceiptText,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Banknote
 } from 'lucide-react';
 
 interface ReportsViewProps {
@@ -26,6 +28,7 @@ interface ReportsViewProps {
   expenses: Expense[];
   customers: Customer[];
   suppliers: Supplier[];
+  returns?: CustomerReturn[];
   currency: CurrencyCode;
   isBeginner: boolean;
   onToggleBeginnerMode: () => void;
@@ -39,6 +42,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   expenses,
   customers,
   suppliers,
+  returns = [],
   currency,
   isBeginner,
   onToggleBeginnerMode,
@@ -46,7 +50,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   onNavigateToSales,
 }) => {
   const [timeframe, setTimeframe] = useState<'Daily' | 'Weekly' | 'Monthly'>('Daily');
-  const [reportsSubTab, setReportsSubTab] = useState<'all' | '7day-breakdown' | 'financial-health' | 'tax-report'>('all');
+  const [reportsSubTab, setReportsSubTab] = useState<'all' | 'payment-methods' | '7day-breakdown' | 'financial-health' | 'tax-report'>('all');
   const [showExportMenu, setShowExportMenu] = useState(false);
 
   const metrics = calculateDashboardMetrics(products, sales, expenses, [], customers, suppliers);
@@ -181,6 +185,20 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </button>
 
         <button
+          id="report-tab-payment-methods-btn"
+          type="button"
+          onClick={() => setReportsSubTab('payment-methods')}
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+            reportsSubTab === 'payment-methods'
+              ? 'bg-emerald-600 text-white shadow-xs'
+              : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <Banknote className="w-3.5 h-3.5" />
+          <span>Sales by Payment Method</span>
+        </button>
+
+        <button
           id="report-tab-tax-btn"
           type="button"
           onClick={() => setReportsSubTab('tax-report')}
@@ -227,6 +245,16 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           <span>Health Score & P&L</span>
         </button>
       </div>
+
+      {/* SALES BY PAYMENT METHOD REPORT COMPONENT */}
+      {(reportsSubTab === 'all' || reportsSubTab === 'payment-methods') && (
+        <PaymentMethodSalesReport
+          sales={sales}
+          returns={returns}
+          currency={currency}
+          onNavigateToSales={onNavigateToSales}
+        />
+      )}
 
       {/* TAX & VAT SUMMARY REPORT COMPONENT */}
       {(reportsSubTab === 'all' || reportsSubTab === 'tax-report') && (

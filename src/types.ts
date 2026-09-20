@@ -63,7 +63,12 @@ export interface Product {
   variants?: ProductVariant[];
 }
 
-export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Bank' | 'Credit';
+export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Bank' | 'Credit' | 'Split';
+
+export interface PaymentSplit {
+  method: 'Cash' | 'Mobile Money' | 'Bank';
+  amount: number;
+}
 
 export interface SaleItem {
   productId: string;
@@ -85,6 +90,7 @@ export interface Sale {
   totalCost?: number;
   profit?: number;
   paymentMethod: PaymentMethod;
+  paymentSplits?: PaymentSplit[]; // Supports multiple payment methods for partial payments
   paymentStatus?: 'PAID' | 'UNPAID' | 'PARTIAL';
   status?: string;
   customerId?: string;
@@ -94,6 +100,8 @@ export interface Sale {
   isVoided?: boolean;
   voidedAt?: string;
   voidedBy?: string;
+  staffId?: string;
+  staffName?: string;
 }
 
 export type ExpenseCategory = 
@@ -352,5 +360,194 @@ export interface ArchivedBusinessPeriod {
   activityLogs?: BusinessActivityLogEntry[];
 }
 
+export type StaffRole = 'Cashier' | 'Manager' | 'Owner';
 
+export interface StaffPermissions {
+  // Cashier default permissions
+  canRecordSales: boolean;
+  canViewProductsForSelling: boolean;
+  canViewStockAvailability: boolean;
+  canCreateViewReceipts: boolean;
+  canSelectPaymentMethod: boolean;
+  canSelectCustomerForSale: boolean;
 
+  // Transaction control
+  canDeleteSales: boolean;
+  canEditCompletedSales: boolean;
+  canDeleteCustomers: boolean;
+  canDeleteProducts: boolean;
+  canChangeProductPrices: boolean;
+  canChangeStock: boolean;
+  canDeleteExpenses: boolean;
+  canDeleteSupplierRecords: boolean;
+
+  // Owner-only information
+  canViewProfit: boolean;
+  canViewReports: boolean;
+  canViewExpenses: boolean;
+  canViewSupplierBalances: boolean;
+  canManageSuppliers?: boolean;
+  canViewBusinessFinancialSummary: boolean;
+  canViewAIBusinessAnalysis: boolean;
+  canManageStaff: boolean;
+  canAccessBusinessSettings: boolean;
+}
+
+export interface StaffMember {
+  id: string;
+  name: string;
+  role: StaffRole;
+  status: 'ACTIVE' | 'DISABLED';
+  cashierPinHash: string; // Stored securely (hashed, never exposed plain text)
+  hasPin: boolean;
+  pinMasked?: string; // Display e.g. "••••"
+  permissions: StaffPermissions;
+  businessId: string;
+  businessName: string;
+  ownerId: string;
+  createdAt: string;
+  updatedAt?: string;
+  lastActiveAt?: string;
+  accessToken: string; // Secure token for link / QR code access
+}
+
+export interface SaleCorrectionRequest {
+  id: string;
+  businessId: string;
+  saleId: string;
+  invoiceNumber?: string;
+  staffId: string;
+  staffName: string;
+  requestedAt: string;
+  reason: string;
+  notes?: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  saleAmount: number;
+  saleItemsSummary: string;
+  paymentMethod?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNotes?: string;
+}
+
+export interface StaffActivityLogEntry {
+  id: string;
+  businessId: string;
+  staffId: string;
+  staffName: string;
+  staffRole: StaffRole;
+  action: 
+    | 'sale_recorded' 
+    | 'receipt_issued' 
+    | 'shift_opened' 
+    | 'shift_closed' 
+    | 'correction_requested' 
+    | 'correction_approved' 
+    | 'login' 
+    | 'lock' 
+    | 'staff_updated' 
+    | 'staff_removed' 
+    | 'staff_enabled' 
+    | 'staff_disabled' 
+    | 'session_started';
+  title: string;
+  details: string;
+  amount?: number;
+  paymentMethod?: string;
+  timestamp: string; // ISO string
+  relatedId?: string;
+}
+
+export interface StaffSession {
+  staffId: string;
+  staffName: string;
+  role: StaffRole;
+  businessId: string;
+  ownerId: string;
+  businessName: string;
+  permissions: StaffPermissions;
+  authenticatedAt: string;
+  expiresAt: string;
+  isLocked?: boolean;
+}
+
+export const DEFAULT_CASHIER_PERMISSIONS: StaffPermissions = {
+  canRecordSales: true,
+  canViewProductsForSelling: true,
+  canViewStockAvailability: true,
+  canCreateViewReceipts: true,
+  canSelectPaymentMethod: true,
+  canSelectCustomerForSale: true,
+
+  canDeleteSales: false,
+  canEditCompletedSales: false,
+  canDeleteCustomers: false,
+  canDeleteProducts: false,
+  canChangeProductPrices: false,
+  canChangeStock: false,
+  canDeleteExpenses: false,
+  canDeleteSupplierRecords: false,
+
+  canViewProfit: false,
+  canViewReports: false,
+  canViewExpenses: false,
+  canViewSupplierBalances: false,
+  canViewBusinessFinancialSummary: false,
+  canViewAIBusinessAnalysis: false,
+  canManageStaff: false,
+  canAccessBusinessSettings: false,
+};
+
+export const DEFAULT_MANAGER_PERMISSIONS: StaffPermissions = {
+  canRecordSales: true,
+  canViewProductsForSelling: true,
+  canViewStockAvailability: true,
+  canCreateViewReceipts: true,
+  canSelectPaymentMethod: true,
+  canSelectCustomerForSale: true,
+
+  canDeleteSales: false,
+  canEditCompletedSales: true,
+  canDeleteCustomers: false,
+  canDeleteProducts: false,
+  canChangeProductPrices: true,
+  canChangeStock: true,
+  canDeleteExpenses: false,
+  canDeleteSupplierRecords: false,
+
+  canViewProfit: true,
+  canViewReports: true,
+  canViewExpenses: true,
+  canViewSupplierBalances: true,
+  canViewBusinessFinancialSummary: true,
+  canViewAIBusinessAnalysis: false,
+  canManageStaff: false,
+  canAccessBusinessSettings: false,
+};
+
+export const DEFAULT_OWNER_PERMISSIONS: StaffPermissions = {
+  canRecordSales: true,
+  canViewProductsForSelling: true,
+  canViewStockAvailability: true,
+  canCreateViewReceipts: true,
+  canSelectPaymentMethod: true,
+  canSelectCustomerForSale: true,
+
+  canDeleteSales: true,
+  canEditCompletedSales: true,
+  canDeleteCustomers: true,
+  canDeleteProducts: true,
+  canChangeProductPrices: true,
+  canChangeStock: true,
+  canDeleteExpenses: true,
+  canDeleteSupplierRecords: true,
+
+  canViewProfit: true,
+  canViewReports: true,
+  canViewExpenses: true,
+  canViewSupplierBalances: true,
+  canViewBusinessFinancialSummary: true,
+  canViewAIBusinessAnalysis: true,
+  canManageStaff: true,
+  canAccessBusinessSettings: true,
+};

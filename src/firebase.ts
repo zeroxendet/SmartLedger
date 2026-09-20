@@ -36,6 +36,7 @@ import {
   Firestore 
 } from 'firebase/firestore';
 import firebaseConfigData from '../firebase-applet-config.json';
+import { isSessionCurrentlyLocked } from './utils/sessionLock';
 import { 
   BusinessProfile, 
   Product, 
@@ -49,7 +50,10 @@ import {
   WasteLog,
   NotificationItem,
   BusinessActivityLogEntry,
-  ArchivedBusinessPeriod
+  ArchivedBusinessPeriod,
+  StaffMember,
+  SaleCorrectionRequest,
+  StaffActivityLogEntry
 } from './types';
 
 // Check if user has provided a custom Firebase console configuration
@@ -166,6 +170,9 @@ export interface UserWorkspaceData {
   };
   productionLogs: ProductionLog[];
   wasteLogs: WasteLog[];
+  staff?: StaffMember[];
+  staffActivities?: StaffActivityLogEntry[];
+  correctionRequests?: SaleCorrectionRequest[];
   lastSyncedAt: string;
 }
 
@@ -539,7 +546,18 @@ export async function saveUserWorkspaceToFirestore(
   userId: string,
   workspaceData: Partial<UserWorkspaceData>
 ): Promise<{ success: boolean; error?: any }> {
+  if (isSessionCurrentlyLocked()) {
+    return { success: false, error: 'session_locked' };
+  }
   if (!userId) return { success: false, error: 'No userId provided' };
+  // Skip Firestore for local offline sessions
+  if (userId.startsWith('local_') || userId === 'local_user_default') {
+    return { success: true };
+  }
+  // Only attempt write when authenticated as this specific user
+  if (!auth.currentUser || auth.currentUser.uid !== userId) {
+    return { success: false, error: 'unauthenticated' };
+  }
   try {
     const userDocRef = doc(db, 'users', userId);
     // Sanitize payload to eliminate any undefined values that could violate Firestore specifications
@@ -575,7 +593,18 @@ export async function saveUserWorkspaceToFirestore(
 export async function fetchUserWorkspaceFromFirestore(
   userId: string
 ): Promise<{ success: boolean; data?: UserWorkspaceData; error?: any }> {
+  if (isSessionCurrentlyLocked()) {
+    return { success: false, error: 'session_locked' };
+  }
   if (!userId) return { success: false, error: 'No userId provided' };
+  // Skip remote fetch for local offline sessions
+  if (userId.startsWith('local_') || userId === 'local_user_default') {
+    return { success: false, error: 'local_user' };
+  }
+  // Prevent unauthenticated remote queries that would produce permission-denied warnings
+  if (!auth.currentUser || auth.currentUser.uid !== userId) {
+    return { success: false, error: 'unauthenticated' };
+  }
   try {
     const userDocRef = doc(db, 'users', userId);
     // 4-second timeout safeguard to allow local/offline operation without freezing the UI
@@ -604,7 +633,12 @@ export async function logBusinessActivity(
   userId: string,
   entry: Omit<BusinessActivityLogEntry, 'id'>
 ): Promise<string | null> {
-  if (!userId || !db) return null;
+  if (isSessionCurrentlyLocked()) {
+    return null;
+  }
+  if (!userId || !db || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return null;
+  }
   try {
     const activityCol = collection(db, 'users', userId, 'activity_log');
     const writePromise = addDoc(activityCol, {
@@ -624,7 +658,9 @@ export async function logBusinessActivity(
  * Delete an individual activity log document by ID from Firestore
  */
 export async function deleteBusinessActivityLog(userId: string, logId: string): Promise<boolean> {
-  if (!userId || !db || !logId) return false;
+  if (!userId || !db || !logId || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return false;
+  }
   try {
     const docRef = doc(db, 'users', userId, 'activity_log', logId);
     await deleteDoc(docRef);
@@ -639,7 +675,9 @@ export async function deleteBusinessActivityLog(userId: string, logId: string): 
  * Delete activity log documents matching a related transaction ID
  */
 export async function deleteBusinessActivityLogsByRelatedId(userId: string, relatedId: string): Promise<boolean> {
-  if (!userId || !db || !relatedId) return false;
+  if (!userId || !db || !relatedId || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return false;
+  }
   try {
     const activityCol = collection(db, 'users', userId, 'activity_log');
     const q = query(activityCol, where('relatedId', '==', relatedId));
@@ -661,7 +699,10 @@ export function subscribeToBusinessActivityLog(
   onUpdate: (entries: BusinessActivityLogEntry[]) => void,
   onError?: (err: any) => void
 ): () => void {
-  if (!userId || !db) {
+  if (isSessionCurrentlyLocked()) {
+    return () => {};
+  }
+  if (!userId || !db || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
     return () => {};
   }
 
@@ -699,7 +740,12 @@ export async function archiveBusinessPeriodToFirestore(
   userId: string,
   period: ArchivedBusinessPeriod
 ): Promise<{ success: boolean; error?: any }> {
-  if (!userId || !db) return { success: false, error: 'Database not available' };
+  if (isSessionCurrentlyLocked()) {
+    return { success: false, error: 'session_locked' };
+  }
+  if (!userId || !db || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return { success: true };
+  }
   try {
     const periodDocRef = doc(db, 'users', userId, 'archived_periods', period.id);
     const sanitizedPeriod = JSON.parse(
@@ -719,7 +765,12 @@ export async function archiveBusinessPeriodToFirestore(
 export async function fetchArchivedPeriodsFromFirestore(
   userId: string
 ): Promise<{ success: boolean; data?: ArchivedBusinessPeriod[]; error?: any }> {
-  if (!userId || !db) return { success: false, error: 'Database not available' };
+  if (isSessionCurrentlyLocked()) {
+    return { success: false, error: 'session_locked' };
+  }
+  if (!userId || !db || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return { success: false, error: 'unauthenticated' };
+  }
   try {
     const periodsCol = collection(db, 'users', userId, 'archived_periods');
     const q = query(periodsCol, orderBy('archivedAt', 'desc'));
@@ -742,7 +793,9 @@ export async function deleteArchivedPeriodFromFirestore(
   userId: string,
   periodId: string
 ): Promise<{ success: boolean; error?: any }> {
-  if (!userId || !db || !periodId) return { success: false, error: 'Database or period ID missing' };
+  if (!userId || !db || !periodId || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return { success: true };
+  }
   try {
     const periodDocRef = doc(db, 'users', userId, 'archived_periods', periodId);
     await deleteDoc(periodDocRef);

@@ -91,7 +91,8 @@ export const SessionLockScreen: React.FC<SessionLockScreenProps> = ({
     try {
       // If we have an email and Firebase auth is active, verify via Firebase
       if (effectiveEmail && effectiveEmail.includes('@') && !effectiveEmail.endsWith('@smartledger.local')) {
-        await signInWithEmailAndPassword(auth, effectiveEmail, password);
+        const userCredential = await signInWithEmailAndPassword(auth, effectiveEmail, password);
+        await userCredential.user.getIdToken(true);
       } else {
         // Local/offline workspace verification
         // Check if user set a local account password or check standard password
@@ -125,6 +126,7 @@ export const SessionLockScreen: React.FC<SessionLockScreenProps> = ({
     try {
       const userCredential = await signInWithPopup(auth, googleProvider);
       const user = userCredential.user;
+      await user.getIdToken(true);
 
       // Verify that this Google account matches the locked business account if email is known
       if (effectiveEmail && user.email && effectiveEmail.includes('@') && !effectiveEmail.endsWith('@smartledger.local')) {

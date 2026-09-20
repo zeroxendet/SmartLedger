@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Product, PaymentMethod, Sale, Customer, CurrencyCode, BusinessProfile } from '../types';
+import { Product, PaymentMethod, PaymentSplit, Sale, Customer, CurrencyCode, BusinessProfile } from '../types';
 import { formatCurrency } from '../utils/calculations';
 import { generateWhatsAppReceiptText, openWhatsAppReceipt } from '../utils/receiptUtils';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
@@ -52,6 +52,18 @@ export const SellModal: React.FC<SellModalProps> = ({
   const [newCustomerName, setNewCustomerName] = useState<string>('');
   const [selectedVariantId, setSelectedVariantId] = useState<string>('');
   
+  // Split payment state
+  const [splitAmounts, setSplitAmounts] = useState<{
+    Cash: number;
+    'Mobile Money': number;
+    Bank: number;
+  }>({
+    Cash: 0,
+    'Mobile Money': 0,
+    Bank: 0,
+  });
+  const [splitAllocationError, setSplitAllocationError] = useState<string | null>(null);
+
   // Scanner & Receipt modals state
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
@@ -137,6 +149,20 @@ export const SellModal: React.FC<SellModalProps> = ({
       return;
     }
 
+    const totalAmount = calculateTotal();
+
+    // Split Payment Validation
+    if (paymentMethod === 'Split') {
+      const allocated = (splitAmounts.Cash || 0) + (splitAmounts['Mobile Money'] || 0) + (splitAmounts.Bank || 0);
+      if (allocated !== totalAmount) {
+        setSplitAllocationError(
+          `Allocated ${formatCurrency(allocated, currency)} does not match total ${formatCurrency(totalAmount, currency)}. Remaining: ${formatCurrency(totalAmount - allocated, currency)}`
+        );
+        return;
+      }
+    }
+
+    setSplitAllocationError(null);
     finalizeSale(0);
   };
 
@@ -161,6 +187,20 @@ export const SellModal: React.FC<SellModalProps> = ({
       ? `${selectedProduct.name} (${activeVariant.name})` 
       : selectedProduct.name;
 
+    // Generate Payment Splits
+    let paymentSplits: PaymentSplit[] | undefined = undefined;
+    if (paymentMethod === 'Split') {
+      paymentSplits = [
+        { method: 'Cash' as const, amount: splitAmounts.Cash || 0 },
+        { method: 'Mobile Money' as const, amount: splitAmounts['Mobile Money'] || 0 },
+        { method: 'Bank' as const, amount: splitAmounts.Bank || 0 },
+      ].filter((s) => s.amount > 0);
+    } else if (paymentMethod === 'Cash' || paymentMethod === 'Mobile Money' || paymentMethod === 'Bank') {
+      paymentSplits = [
+        { method: paymentMethod, amount: totalAmount }
+      ];
+    }
+
     const newSale: Sale = {
       id: `sale_${Date.now()}`,
       invoiceNumber: `INV-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -178,6 +218,7 @@ export const SellModal: React.FC<SellModalProps> = ({
       totalCost,
       profit,
       paymentMethod,
+      paymentSplits,
       paymentStatus: paymentMethod === 'Credit' ? 'UNPAID' : 'PAID',
       customerId: paymentMethod === 'Credit' ? custId : undefined,
       customerName: paymentMethod === 'Credit' ? custName : undefined,
@@ -264,9 +305,21 @@ export const SellModal: React.FC<SellModalProps> = ({
                 <div className="flex justify-between items-center text-[11px] text-slate-500 pt-1">
                   <span>Payment Method:</span>
                   <span className="font-bold text-slate-700">
-                    {completedSale.paymentMethod} &mdash; {completedSale.paymentStatus}
+                    {completedSale.paymentMethod === 'Split' ? 'Split Payment' : completedSale.paymentMethod} &mdash; {completedSale.paymentStatus}
                   </span>
                 </div>
+
+                {completedSale.paymentSplits && completedSale.paymentSplits.length > 1 && (
+                  <div className="p-2 rounded-lg bg-white border border-slate-200 text-[11px] space-y-1">
+                    <span className="font-bold text-slate-700 block">Payment Breakdown:</span>
+                    {completedSale.paymentSplits.map((split, i) => (
+                      <div key={i} className="flex justify-between items-center text-slate-600">
+                        <span>• {split.method}:</span>
+                        <span className="font-bold text-slate-800">{formatCurrency(split.amount, currency)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {completedSale.customerName && (
                   <div className="flex justify-between items-center text-[11px] text-amber-700 pt-1">
@@ -558,18 +611,32 @@ export const SellModal: React.FC<SellModalProps> = ({
                     <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-2">
                       How did the customer pay?
                     </label>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                       {[
                         { method: 'Cash' as PaymentMethod, icon: '💵', label: 'Cash' },
                         { method: 'Mobile Money' as PaymentMethod, icon: '📱', label: 'Mobile Money' },
                         { method: 'Bank' as PaymentMethod, icon: '🏦', label: 'Bank' },
+                        { method: 'Split' as PaymentMethod, icon: '🔀', label: 'Split / Partial' },
                         ...(allowCustomerCredit ? [{ method: 'Credit' as PaymentMethod, icon: '📝', label: 'Credit (Pay Later)' }] : []),
                       ].map((pm) => (
                         <button
                           key={pm.method}
                           type="button"
                           id={`pay-method-${pm.method.toLowerCase().replace(/[^a-z]/g, '')}`}
-                          onClick={() => setPaymentMethod(pm.method)}
+                          onClick={() => {
+                            setPaymentMethod(pm.method);
+                            setSplitAllocationError(null);
+                            if (pm.method === 'Split') {
+                              // If uninitialized, default Cash to the current total
+                              if (!splitAmounts.Cash && !splitAmounts['Mobile Money'] && !splitAmounts.Bank) {
+                                setSplitAmounts({
+                                  Cash: calculateTotal(),
+                                  'Mobile Money': 0,
+                                  Bank: 0,
+                                });
+                              }
+                            }
+                          }}
                           className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
                             paymentMethod === pm.method
                               ? 'border-emerald-600 bg-emerald-50 text-emerald-900 font-bold shadow-sm'
@@ -582,6 +649,149 @@ export const SellModal: React.FC<SellModalProps> = ({
                       ))}
                     </div>
                   </div>
+
+                  {/* Split / Partial Payment Breakdown Inputs */}
+                  {paymentMethod === 'Split' && (
+                    <div className="p-4 bg-slate-50 border border-slate-300 rounded-xl space-y-3 animate-fade-in">
+                      <div className="flex items-center justify-between pb-1 border-b border-slate-200">
+                        <label className="block text-xs font-bold text-slate-900 uppercase tracking-wide">
+                          Split Payment Allocation
+                        </label>
+                        <span className="text-xs text-slate-600">
+                          Total Due: <strong className="text-slate-900">{formatCurrency(calculateTotal(), currency)}</strong>
+                        </span>
+                      </div>
+
+                      {/* Cash Split Input */}
+                      <div className="flex items-center gap-2">
+                        <span className="w-28 text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                          <span>💵</span> Cash
+                        </span>
+                        <input
+                          id="split-input-cash"
+                          type="number"
+                          min="0"
+                          value={splitAmounts.Cash || ''}
+                          onChange={(e) => {
+                            const val = Math.max(0, parseFloat(e.target.value) || 0);
+                            setSplitAmounts((prev) => ({ ...prev, Cash: val }));
+                            setSplitAllocationError(null);
+                          }}
+                          placeholder="0"
+                          className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-extrabold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <button
+                          type="button"
+                          id="split-balance-cash-btn"
+                          onClick={() => {
+                            const total = calculateTotal();
+                            const others = (splitAmounts['Mobile Money'] || 0) + (splitAmounts.Bank || 0);
+                            setSplitAmounts((prev) => ({ ...prev, Cash: Math.max(0, total - others) }));
+                            setSplitAllocationError(null);
+                          }}
+                          className="text-[11px] px-2.5 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg font-bold transition-colors cursor-pointer"
+                        >
+                          Balance
+                        </button>
+                      </div>
+
+                      {/* Mobile Money Split Input */}
+                      <div className="flex items-center gap-2">
+                        <span className="w-28 text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                          <span>📱</span> Mobile Money
+                        </span>
+                        <input
+                          id="split-input-momo"
+                          type="number"
+                          min="0"
+                          value={splitAmounts['Mobile Money'] || ''}
+                          onChange={(e) => {
+                            const val = Math.max(0, parseFloat(e.target.value) || 0);
+                            setSplitAmounts((prev) => ({ ...prev, 'Mobile Money': val }));
+                            setSplitAllocationError(null);
+                          }}
+                          placeholder="0"
+                          className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-extrabold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <button
+                          type="button"
+                          id="split-balance-momo-btn"
+                          onClick={() => {
+                            const total = calculateTotal();
+                            const others = (splitAmounts.Cash || 0) + (splitAmounts.Bank || 0);
+                            setSplitAmounts((prev) => ({ ...prev, 'Mobile Money': Math.max(0, total - others) }));
+                            setSplitAllocationError(null);
+                          }}
+                          className="text-[11px] px-2.5 py-2 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg font-bold transition-colors cursor-pointer"
+                        >
+                          Balance
+                        </button>
+                      </div>
+
+                      {/* Bank Split Input */}
+                      <div className="flex items-center gap-2">
+                        <span className="w-28 text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                          <span>🏦</span> Bank
+                        </span>
+                        <input
+                          id="split-input-bank"
+                          type="number"
+                          min="0"
+                          value={splitAmounts.Bank || ''}
+                          onChange={(e) => {
+                            const val = Math.max(0, parseFloat(e.target.value) || 0);
+                            setSplitAmounts((prev) => ({ ...prev, Bank: val }));
+                            setSplitAllocationError(null);
+                          }}
+                          placeholder="0"
+                          className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-extrabold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <button
+                          type="button"
+                          id="split-balance-bank-btn"
+                          onClick={() => {
+                            const total = calculateTotal();
+                            const others = (splitAmounts.Cash || 0) + (splitAmounts['Mobile Money'] || 0);
+                            setSplitAmounts((prev) => ({ ...prev, Bank: Math.max(0, total - others) }));
+                            setSplitAllocationError(null);
+                          }}
+                          className="text-[11px] px-2.5 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg font-bold transition-colors cursor-pointer"
+                        >
+                          Balance
+                        </button>
+                      </div>
+
+                      {/* Split Validation Status Banner */}
+                      {(() => {
+                        const total = calculateTotal();
+                        const allocated = (splitAmounts.Cash || 0) + (splitAmounts['Mobile Money'] || 0) + (splitAmounts.Bank || 0);
+                        const diff = total - allocated;
+                        if (diff === 0) {
+                          return (
+                            <div className="p-2.5 rounded-lg bg-emerald-100 text-emerald-900 text-xs font-bold flex items-center justify-between">
+                              <span className="flex items-center gap-1.5">
+                                <span>✅</span>
+                                <span>Fully Allocated: {formatCurrency(allocated, currency)}</span>
+                              </span>
+                              <span>Ready</span>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className={`p-2.5 rounded-lg text-xs font-bold flex items-center justify-between ${
+                            diff > 0 ? 'bg-amber-100 text-amber-900' : 'bg-rose-100 text-rose-900'
+                          }`}>
+                            <span>Allocated: {formatCurrency(allocated, currency)} / {formatCurrency(total, currency)}</span>
+                            <span>{diff > 0 ? `Remaining: ${formatCurrency(diff, currency)}` : `Over by: ${formatCurrency(-diff, currency)}`}</span>
+                          </div>
+                        );
+                      })()}
+
+                      {splitAllocationError && (
+                        <p className="text-xs text-rose-600 font-bold">{splitAllocationError}</p>
+                      )}
+                    </div>
+                  )}
 
                   {/* Customer Selection if Credit */}
                   {paymentMethod === 'Credit' && (

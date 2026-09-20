@@ -16,6 +16,7 @@ interface BottomNavBarProps {
   onSelectTab: (tab: NavTabId) => void;
   beginnerMode?: boolean;
   isCashierMode?: boolean;
+  isStaffMode?: boolean;
 }
 
 interface NavItemConfig {
@@ -69,6 +70,7 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
   onSelectTab,
   beginnerMode = false,
   isCashierMode = false,
+  isStaffMode = false,
 }) => {
   return (
     <nav
@@ -80,7 +82,11 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
-          const displayLabel = beginnerMode && item.beginnerLabel ? item.beginnerLabel : item.label;
+          let displayLabel = beginnerMode && item.beginnerLabel ? item.beginnerLabel : item.label;
+          if (isStaffMode && item.id === 'dashboard') {
+            displayLabel = 'Staff POS';
+          }
+          const isItemLocked = (isCashierMode && item.id === 'reports') || (isStaffMode && (item.id === 'reports' || item.id === 'suppliers'));
 
           return (
             <button
@@ -107,8 +113,8 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
                     isActive ? 'scale-110 stroke-[2.4]' : 'scale-100 stroke-[1.8] group-hover:scale-105'
                   }`}
                 />
-                {item.id === 'reports' && isCashierMode && (
-                  <span className="absolute -top-1 -right-1 bg-amber-500 text-slate-950 p-0.5 rounded-full shadow-xs">
+                {isItemLocked && (
+                  <span className="absolute -top-1 -right-1 bg-amber-500 text-slate-950 p-0.5 rounded-full shadow-xs" title="Protected Access">
                     <Lock className="w-2.5 h-2.5" />
                   </span>
                 )}

@@ -41,12 +41,83 @@
           "type": "array",
           "description": "List of suppliers and creditor balances"
         },
+        "staff": {
+          "type": "array",
+          "description": "List of authorized staff members and permission configurations"
+        },
+        "correctionRequests": {
+          "type": "array",
+          "description": "List of cashier sale correction requests pending or reviewed by owner"
+        },
+        "staffActivities": {
+          "type": "array",
+          "description": "Chronological audit log of all cashier and staff recorded transactions"
+        },
         "lastSyncedAt": {
           "type": "string",
           "description": "ISO timestamp of the most recent sync"
         }
       },
       "required": ["userId", "profile"]
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Staff profile, role preset, and granular permission controls managed by business owner",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["Cashier", "Manager", "Owner"] },
+        "status": { "type": "string", "enum": ["ACTIVE", "DISABLED"] },
+        "cashierPinHash": { "type": "string" },
+        "hasPin": { "type": "boolean" },
+        "businessId": { "type": "string" },
+        "businessName": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "permissions": { "type": "object" },
+        "accessToken": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "role", "status", "businessId", "ownerId"]
+    },
+    "SaleCorrectionRequest": {
+      "title": "SaleCorrectionRequest",
+      "description": "Staff request to owner for correcting or voiding an accidental or duplicate sale",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "businessId": { "type": "string" },
+        "saleId": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "staffId": { "type": "string" },
+        "staffName": { "type": "string" },
+        "requestedAt": { "type": "string" },
+        "reason": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"] },
+        "saleAmount": { "type": "number" },
+        "saleItemsSummary": { "type": "string" }
+      },
+      "required": ["businessId", "saleId", "staffId", "staffName", "reason", "status"]
+    },
+    "StaffActivityLogEntry": {
+      "title": "StaffActivityLogEntry",
+      "description": "Staff recorded sales and action log for owner accountability",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "businessId": { "type": "string" },
+        "staffId": { "type": "string" },
+        "staffName": { "type": "string" },
+        "staffRole": { "type": "string" },
+        "action": { "type": "string" },
+        "title": { "type": "string" },
+        "details": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["businessId", "staffId", "staffName", "action", "timestamp"]
     },
     "BusinessActivityLogEntry": {
       "title": "BusinessActivityLogEntry",

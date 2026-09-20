@@ -1,6 +1,7 @@
-import React from 'react';
-import { Product, Sale, Expense, Customer, Supplier, BusinessProfile, CashRegisterShift } from '../types';
+import React, { useMemo } from 'react';
+import { Product, Sale, Expense, Customer, Supplier, BusinessProfile, CashRegisterShift, CustomerReturn, StaffMember } from '../types';
 import { formatCurrency, calculateDashboardMetrics } from '../utils/calculations';
+import { calculateTodayPaymentSummary } from '../utils/paymentReports';
 import { 
   ShoppingCart, 
   PackagePlus, 
@@ -23,6 +24,8 @@ import {
   KeyRound,
   ShieldCheck,
   Share2,
+  Banknote,
+  Users,
   Settings as SettingsIcon
 } from 'lucide-react';
 
@@ -33,6 +36,7 @@ interface DashboardViewProps {
   expenses: Expense[];
   customers: Customer[];
   suppliers: Supplier[];
+  returns?: CustomerReturn[];
   isCashierMode?: boolean;
   onUnlockCashierMode?: () => void;
   onLockCashierMode?: () => void;
@@ -49,6 +53,8 @@ interface DashboardViewProps {
   onOpenReceiveMoney: () => void;
   onOpenAI: () => void;
   onOpenBakery: () => void;
+  staffList?: StaffMember[];
+  onOpenStaffManagement?: () => void;
   onNavigateTab: (tab: 'products' | 'customers' | 'suppliers' | 'reports' | 'feed') => void;
 }
 
@@ -59,6 +65,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   expenses,
   customers,
   suppliers,
+  returns = [],
   isCashierMode = false,
   onUnlockCashierMode,
   onLockCashierMode,
@@ -75,10 +82,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenReceiveMoney,
   onOpenAI,
   onOpenBakery,
+  staffList = [],
+  onOpenStaffManagement,
   onNavigateTab,
 }) => {
   const metrics = calculateDashboardMetrics(products, sales, expenses, [], customers, suppliers);
   const currency = profile.currency;
+
+  // Calculate Today's Payment Method Sales Breakdown
+  const todayPaymentSummary = useMemo(
+    () => calculateTodayPaymentSummary(sales, returns),
+    [sales, returns]
+  );
 
   const lowStockProducts = products.filter((p) => p.stock <= p.minStockLevel);
   const debtors = customers.filter((c) => c.amountOwed > 0);
@@ -232,7 +247,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         {/* Card 1: Today's Sales */}
         <div 
           id="card-todays-sales"
-          onClick={() => onNavigateTab('feed')}
+          onClick={() => onNavigateTab('reports')}
           className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm hover:border-slate-300 hover:shadow-md transition-all cursor-pointer flex flex-col justify-between"
         >
           <div className="flex items-center justify-between">
@@ -243,11 +258,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <div className="my-2">
             <p className="text-xl sm:text-2xl font-extrabold text-slate-900 font-['Outfit',sans-serif]">
-              {formatCurrency(metrics.salesToday, currency)}
+              {formatCurrency(todayPaymentSummary.total, currency)}
             </p>
           </div>
           <p className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1">
-            <span>{sales.length} sale(s)</span>
+            <span>{todayPaymentSummary.transactionCount} sale(s) today</span>
             <ChevronRight className="w-3 h-3" />
           </p>
         </div>
@@ -350,6 +365,136 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
       </div>
+
+      {/* TODAY'S SALES BY PAYMENT METHOD SUMMARY */}
+      <div 
+        id="dashboard-todays-payment-methods-summary"
+        className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 shadow-sm"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3.5 pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <span className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600">
+              <Banknote className="w-4 h-4" />
+            </span>
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 font-['Outfit',sans-serif]">
+                Today's Sales
+              </h4>
+              <p className="text-[11px] text-slate-400">
+                Payment method collection summary
+              </p>
+            </div>
+          </div>
+          <button
+            id="dashboard-view-payment-reports-link-btn"
+            type="button"
+            onClick={() => onNavigateTab('reports')}
+            className="text-xs font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1 cursor-pointer"
+          >
+            <span>View Reports</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Cash */}
+          <div 
+            id="dashboard-today-cash-card"
+            onClick={() => onNavigateTab('reports')}
+            className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-100 cursor-pointer hover:bg-emerald-50 transition-colors"
+          >
+            <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-800 mb-1">
+              <span>💵</span>
+              <span>Cash:</span>
+            </div>
+            <p className="text-base sm:text-lg font-extrabold text-slate-900 font-['Outfit',sans-serif]">
+              {formatCurrency(todayPaymentSummary.cash, currency)}
+            </p>
+          </div>
+
+          {/* Mobile Money */}
+          <div 
+            id="dashboard-today-momo-card"
+            onClick={() => onNavigateTab('reports')}
+            className="p-3 rounded-xl bg-amber-50/70 border border-amber-100 cursor-pointer hover:bg-amber-50 transition-colors"
+          >
+            <div className="flex items-center gap-1.5 text-xs font-bold text-amber-800 mb-1">
+              <span>📱</span>
+              <span>Mobile Money:</span>
+            </div>
+            <p className="text-base sm:text-lg font-extrabold text-slate-900 font-['Outfit',sans-serif]">
+              {formatCurrency(todayPaymentSummary.mobileMoney, currency)}
+            </p>
+          </div>
+
+          {/* Bank */}
+          <div 
+            id="dashboard-today-bank-card"
+            onClick={() => onNavigateTab('reports')}
+            className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-100 cursor-pointer hover:bg-indigo-50 transition-colors"
+          >
+            <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-800 mb-1">
+              <span>🏦</span>
+              <span>Bank:</span>
+            </div>
+            <p className="text-base sm:text-lg font-extrabold text-slate-900 font-['Outfit',sans-serif]">
+              {formatCurrency(todayPaymentSummary.bank, currency)}
+            </p>
+          </div>
+
+          {/* Total */}
+          <div 
+            id="dashboard-today-total-card"
+            onClick={() => onNavigateTab('reports')}
+            className="p-3 rounded-xl bg-slate-900 text-white border border-slate-800 shadow-xs cursor-pointer hover:bg-slate-800 transition-colors"
+          >
+            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-300 mb-1">
+              <span>📊</span>
+              <span>Total:</span>
+            </div>
+            <p className="text-base sm:text-lg font-extrabold text-white font-['Outfit',sans-serif]">
+              {formatCurrency(todayPaymentSummary.total, currency)}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 8. OWNER DASHBOARD: STAFF ACCESS SECTION */}
+      {!isCashierMode && (
+        <div 
+          id="dashboard-staff-status-section"
+          className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">👥</span>
+            <div>
+              <h4 className="text-sm font-bold text-slate-900">
+                Staff
+              </h4>
+              <div className="flex items-center gap-3 mt-0.5 text-xs">
+                <span className="font-semibold text-emerald-700 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                  {staffList.filter((s) => s.status === 'ACTIVE').length} Active
+                </span>
+                <span className="font-semibold text-rose-700 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                  {staffList.filter((s) => s.status === 'DISABLED').length} Disabled
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <button
+            id="btn-dashboard-manage-staff"
+            type="button"
+            onClick={onOpenStaffManagement}
+            className="px-3.5 py-2 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 border border-slate-200 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+          >
+            <Users className="w-3.5 h-3.5 text-indigo-600" />
+            <span>Manage Staff</span>
+          </button>
+        </div>
+      )}
 
       {/* QUICK ACTIONS */}
       <div>
