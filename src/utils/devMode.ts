@@ -12,43 +12,53 @@ export const OWNER_EMAILS = [
 ];
 
 /**
- * Check if the current context is running in developer or owner mode.
+ * Strict Owner and Developer Verification.
  * 
- * Criteria:
- * 1. URL parameter: ?dev=true or ?admin=true or ?owner=true (or dev=false to force off)
- * 2. LocalStorage setting: 'smartledger_dev_mode' === 'true'
- * 3. User email matching known owner/admin emails or @smartledger.app domain
- * 4. Localhost development environment
+ * Enforces Zero-Trust authorization:
+ * - A user CANNOT become an owner or developer via URL params, localStorage, or state tampering.
+ * - Authenticated Firebase identity must match developer whitelist or business owner UID.
+ * - Staff members, cashiers, managers, and accountants are strictly excluded.
+ */
+export function isVerifiedOwnerOrDeveloper(
+  currentUser: { uid?: string; email?: string | null } | null | undefined,
+  businessOwnerId?: string | null,
+  isStaffSessionActive?: boolean
+): boolean {
+  // If in staff mode, or staff session is active -> ZERO ACCESS
+  if (isStaffSessionActive) {
+    return false;
+  }
+
+  if (!currentUser || !currentUser.uid) {
+    return false;
+  }
+
+  const email = (currentUser.email || '').toLowerCase().trim();
+
+  // 1. Verified App Developer / Super Admin
+  if (email && OWNER_EMAILS.some(o => o.toLowerCase() === email)) {
+    return true;
+  }
+  if (email && (email.endsWith('@smartledger.app') || email.endsWith('@smartledger.rw'))) {
+    return true;
+  }
+
+  // 2. Verified Business Owner (UID matches business owner ID)
+  if (businessOwnerId && currentUser.uid === businessOwnerId) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Check if the current context is running in developer or owner mode.
+ * Secured against unauthorized role escalation.
  */
 export function checkIsDevOrOwner(currentUserEmail?: string | null): boolean {
   if (typeof window === 'undefined') return false;
 
-  // 1. Check URL query parameters
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const devParam = params.get('dev') || params.get('admin') || params.get('owner') || params.get('debug');
-    if (devParam === 'true' || devParam === '1') {
-      localStorage.setItem('smartledger_dev_mode', 'true');
-      return true;
-    }
-    if (devParam === 'false' || devParam === '0') {
-      localStorage.setItem('smartledger_dev_mode', 'false');
-      return false;
-    }
-  } catch {
-    // Ignore URL errors
-  }
-
-  // 2. Explicit user toggle in LocalStorage
-  try {
-    const stored = localStorage.getItem('smartledger_dev_mode');
-    if (stored === 'true') return true;
-    if (stored === 'false') return false;
-  } catch {
-    // Ignore storage errors
-  }
-
-  // 3. Authenticated user email check
+  // 1. Authenticated user email check (Primary authentic source)
   if (currentUserEmail) {
     const email = currentUserEmail.toLowerCase().trim();
     if (OWNER_EMAILS.some(o => o.toLowerCase() === email)) {
@@ -59,7 +69,7 @@ export function checkIsDevOrOwner(currentUserEmail?: string | null): boolean {
     }
   }
 
-  // 4. Development environment (localhost / 127.0.0.1)
+  // 2. Localhost development environment only
   try {
     const hostname = window.location.hostname;
     if (hostname === 'localhost' || hostname === '127.0.0.1') {

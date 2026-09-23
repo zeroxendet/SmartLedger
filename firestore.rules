@@ -10,26 +10,54 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
+    function isSuperAdmin() {
       return isSignedIn() && (
-        request.auth.uid == userId ||
-        request.auth.token.email == 'zeroxendet@gmail.com'
+        request.auth.token.email == 'zeroxendet@gmail.com' ||
+        request.auth.token.email == 'admin@smartledger.app' ||
+        request.auth.token.email == 'admin@smartledger.rw'
       );
     }
 
-    match /users/{userId} {
-      allow read, write: if isOwner(userId);
+    function isOwner(businessId) {
+      return isSignedIn() && (
+        request.auth.uid == businessId ||
+        isSuperAdmin()
+      );
+    }
 
-      // Staff subcollections strictly protected by owner identity
-      match /staff/{staffId} {
+    // High-Privilege Developer-Only Configuration
+    match /system_config/{configId} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // Businesses primary tree
+    match /businesses/{businessId} {
+      allow read: if isOwner(businessId) || isSignedIn();
+      allow create, update: if isOwner(businessId);
+      allow delete: if isOwner(businessId);
+
+      // Products collection: businesses/{businessId}/products/{productId}
+      // Enforces safe owner-only deletion
+      match /products/{productId} {
+        allow read: if isOwner(businessId) || isSignedIn();
+        allow create, update: if isOwner(businessId);
+        allow delete: if isOwner(businessId);
+      }
+    }
+
+    // User workspaces and subcollections
+    match /users/{userId} {
+      // Workspace readable & updatable by business owner
+      allow read: if isOwner(userId) || isSignedIn();
+      allow update: if isOwner(userId) || isSignedIn();
+      allow create: if isOwner(userId);
+
+      // High-Privilege Business Owner Private Admin (Domain & URL Configuration)
+      match /private_admin/{docId} {
         allow read, write: if isOwner(userId);
       }
 
       match /activity_log/{activityId} {
-        allow read, write: if isOwner(userId);
-      }
-
-      match /correction_requests/{requestId} {
         allow read, write: if isOwner(userId);
       }
 
@@ -43,4 +71,3 @@ service cloud.firestore {
     }
   }
 }
-

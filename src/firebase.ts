@@ -554,8 +554,8 @@ export async function saveUserWorkspaceToFirestore(
   if (userId.startsWith('local_') || userId === 'local_user_default') {
     return { success: true };
   }
-  // Only attempt write when authenticated as this specific user
-  if (!auth.currentUser || auth.currentUser.uid !== userId) {
+  // Only attempt write when authenticated
+  if (!auth.currentUser) {
     return { success: false, error: 'unauthenticated' };
   }
   try {
@@ -602,7 +602,7 @@ export async function fetchUserWorkspaceFromFirestore(
     return { success: false, error: 'local_user' };
   }
   // Prevent unauthenticated remote queries that would produce permission-denied warnings
-  if (!auth.currentUser || auth.currentUser.uid !== userId) {
+  if (!auth.currentUser) {
     return { success: false, error: 'unauthenticated' };
   }
   try {
@@ -636,7 +636,7 @@ export async function logBusinessActivity(
   if (isSessionCurrentlyLocked()) {
     return null;
   }
-  if (!userId || !db || userId.startsWith('local_') || !auth.currentUser || auth.currentUser.uid !== userId) {
+  if (!userId || !db || userId.startsWith('local_') || !auth.currentUser) {
     return null;
   }
   try {

@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Product, Sale, Expense, Customer, Supplier, BusinessProfile, CashRegisterShift, CustomerReturn, StaffMember } from '../types';
+import { Product, Sale, Expense, Customer, Supplier, BusinessProfile, CashRegisterShift, CustomerReturn } from '../types';
 import { formatCurrency, calculateDashboardMetrics } from '../utils/calculations';
 import { calculateTodayPaymentSummary } from '../utils/paymentReports';
 import { 
@@ -26,6 +26,7 @@ import {
   Share2,
   Banknote,
   Users,
+  Zap,
   Settings as SettingsIcon
 } from 'lucide-react';
 
@@ -48,13 +49,13 @@ interface DashboardViewProps {
   onOpenReturns?: () => void;
   activeShift?: CashRegisterShift | null;
   onOpenSell: () => void;
+  onOpenNewSale?: () => void;
+  onOpenReceiptModal?: (sale: Sale) => void;
   onOpenBuyStock: () => void;
   onOpenSpendMoney: () => void;
   onOpenReceiveMoney: () => void;
   onOpenAI: () => void;
   onOpenBakery: () => void;
-  staffList?: StaffMember[];
-  onOpenStaffManagement?: () => void;
   onNavigateTab: (tab: 'products' | 'customers' | 'suppliers' | 'reports' | 'feed') => void;
 }
 
@@ -77,6 +78,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenReturns,
   activeShift,
   onOpenSell,
+  onOpenNewSale,
+  onOpenReceiptModal,
   onOpenBuyStock,
   onOpenSpendMoney,
   onOpenReceiveMoney,
@@ -86,19 +89,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenStaffManagement,
   onNavigateTab,
 }) => {
-  const metrics = calculateDashboardMetrics(products, sales, expenses, [], customers, suppliers);
-  const currency = profile.currency;
-
   // Calculate Today's Payment Method Sales Breakdown
   const todayPaymentSummary = useMemo(
     () => calculateTodayPaymentSummary(sales, returns),
     [sales, returns]
   );
 
-  const lowStockProducts = products.filter((p) => p.stock <= p.minStockLevel);
+  const activeProducts = useMemo(
+    () => products.filter((p) => !p.isArchived && p.status !== 'archived'),
+    [products]
+  );
+
+  const metrics = calculateDashboardMetrics(activeProducts, sales, expenses, [], customers, suppliers);
+  const currency = profile.currency;
+
+  const lowStockProducts = activeProducts.filter((p) => p.stock <= p.minStockLevel);
   const debtors = customers.filter((c) => c.amountOwed > 0);
   const creditors = suppliers.filter((s) => s.amountOwed > 0);
-  const totalProductsLeft = products.reduce((acc, p) => acc + p.stock, 0);
+  const totalProductsLeft = activeProducts.reduce((acc, p) => acc + p.stock, 0);
 
   // Dynamic Greeting based on time of day
   const hour = new Date().getHours();
@@ -459,64 +467,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
-      {/* 8. OWNER DASHBOARD: STAFF ACCESS SECTION */}
-      {!isCashierMode && (
-        <div 
-          id="dashboard-staff-status-section"
-          className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
-        >
-          <div className="flex items-center gap-3">
-            <span className="text-2xl">👥</span>
-            <div>
-              <h4 className="text-sm font-bold text-slate-900">
-                Staff
-              </h4>
-              <div className="flex items-center gap-3 mt-0.5 text-xs">
-                <span className="font-semibold text-emerald-700 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                  {staffList.filter((s) => s.status === 'ACTIVE').length} Active
-                </span>
-                <span className="font-semibold text-rose-700 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-                  {staffList.filter((s) => s.status === 'DISABLED').length} Disabled
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <button
-            id="btn-dashboard-manage-staff"
-            type="button"
-            onClick={onOpenStaffManagement}
-            className="px-3.5 py-2 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 border border-slate-200 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-          >
-            <Users className="w-3.5 h-3.5 text-indigo-600" />
-            <span>Manage Staff</span>
-          </button>
-        </div>
-      )}
-
       {/* QUICK ACTIONS */}
       <div>
-        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">
-          Quick Actions (Instant Record)
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3 flex items-center justify-between">
+          <span>Quick Actions (Instant Record)</span>
+          <span className="text-[11px] font-normal text-slate-400">Method 1: Quick Sell • Method 2: Multi-Product Cart</span>
         </h3>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          {/* Action 1: SELL */}
+          {/* Action 1: MULTI-PRODUCT NEW SALE (Method 2) */}
           <button
-            id="action-btn-sell"
+            id="action-btn-new-sale"
             type="button"
-            onClick={onOpenSell}
-            className="p-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold shadow-md shadow-emerald-900/20 hover:shadow-lg transition-all flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center group"
+            onClick={onOpenNewSale || onOpenSell}
+            className="p-3.5 rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white font-extrabold shadow-md shadow-emerald-950/20 hover:shadow-lg transition-all flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center group"
           >
             <span className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center group-hover:scale-110 transition-transform">
               <ShoppingCart className="w-5 h-5 text-white" />
             </span>
-            <span className="text-xs sm:text-sm tracking-wide">🛒 SELL</span>
-            <span className="text-[10px] text-emerald-100 font-normal">Record sale</span>
+            <span className="text-xs sm:text-sm tracking-wide">🛒 NEW SALE</span>
+            <span className="text-[10px] text-emerald-100 font-normal">Multi-product cart</span>
           </button>
 
-          {/* Action 2: BUY STOCK */}
+          {/* Action 2: QUICK SELL (Method 1) */}
+          <button
+            id="action-btn-quick-sell"
+            type="button"
+            onClick={onOpenSell}
+            className="p-3.5 rounded-2xl bg-emerald-700 hover:bg-emerald-600 text-white font-extrabold shadow-md shadow-emerald-900/20 hover:shadow-lg transition-all flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center group"
+          >
+            <span className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center group-hover:scale-110 transition-transform">
+              <Zap className="w-5 h-5 text-amber-300" />
+            </span>
+            <span className="text-xs sm:text-sm tracking-wide">⚡ QUICK SELL</span>
+            <span className="text-[10px] text-emerald-100 font-normal">Single product</span>
+          </button>
+
+          {/* Action 3: BUY STOCK */}
           <button
             id="action-btn-buy-stock"
             type="button"
@@ -530,7 +516,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <span className="text-[10px] text-blue-100 font-normal">Restock items</span>
           </button>
 
-          {/* Action 3: SPEND MONEY */}
+          {/* Action 4: SPEND MONEY */}
           <button
             id="action-btn-spend-money"
             type="button"
@@ -544,7 +530,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <span className="text-[10px] text-amber-100 font-normal">Expense or bill</span>
           </button>
 
-          {/* Action 4: RECEIVE MONEY */}
+          {/* Action 5: RECEIVE MONEY */}
           <button
             id="action-btn-receive-money"
             type="button"
@@ -558,7 +544,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <span className="text-[10px] text-purple-100 font-normal">Extra income</span>
           </button>
 
-          {/* Action 5: CASH DRAWER & SHIFT (Feature 1) */}
+          {/* Action 6: CASH DRAWER & SHIFT (Feature 1) */}
           {onOpenShiftReconciliation && (
             <button
               id="action-btn-shift-reconcile"
@@ -674,17 +660,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
           ) : (
             <div className="space-y-2">
-              {sales.slice(0, 3).map((sale) => (
-                <div key={sale.id} className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between text-xs">
-                  <div>
-                    <span className="font-bold text-slate-900">Sale: {sale.invoiceNumber}</span>
-                    <p className="text-[11px] text-slate-500">{sale.customerName || 'Walk-in customer'} &bull; {sale.paymentMethod}</p>
+              {sales.slice(0, 3).map((sale) => {
+                const totalUnits = sale.items?.reduce((sum, it) => sum + (it.quantity || 1), 0) || 1;
+                const distinctProducts = sale.items?.length || 1;
+                return (
+                  <div 
+                    key={sale.id} 
+                    onClick={(e) => {
+                      if (onOpenReceiptModal) {
+                        e.stopPropagation();
+                        onOpenReceiptModal(sale);
+                      }
+                    }}
+                    className="p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-100 flex items-center justify-between text-xs transition-colors cursor-pointer"
+                  >
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-slate-900">Sale: {sale.invoiceNumber || sale.id.slice(-6)}</span>
+                        <span className="px-1.5 py-0.2 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                          {distinctProducts > 1 ? `${distinctProducts} products (${totalUnits} units)` : `${totalUnits} unit`}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {sale.customerName || 'Walk-in customer'} &bull; {sale.paymentMethod}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-extrabold text-emerald-600 block">
+                        +{formatCurrency(sale.totalAmount, currency)}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-semibold hover:underline">
+                        Invoice &rarr;
+                      </span>
+                    </div>
                   </div>
-                  <span className="font-extrabold text-emerald-600">
-                    +{formatCurrency(sale.totalAmount, currency)}
-                  </span>
-                </div>
-              ))}
+                );
+              })}
               {expenses.slice(0, 2).map((exp) => (
                 <div key={exp.id} className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between text-xs">
                   <div>

@@ -39,6 +39,12 @@ export function generateWhatsAppReceiptText(
   });
 
   lines.push(divider);
+  if (sale.discount && sale.discount > 0) {
+    if (sale.subtotal) {
+      lines.push(`Subtotal: ${formatCurrency(sale.subtotal, currency)}`);
+    }
+    lines.push(`Discount: -${formatCurrency(sale.discount, currency)}`);
+  }
   lines.push(`*TOTAL: ${formatCurrency(sale.totalAmount, currency)}*`);
   lines.push(`💳 Paid via: ${sale.paymentMethod} (${sale.paymentStatus || 'PAID'})`);
   
@@ -49,6 +55,22 @@ export function generateWhatsAppReceiptText(
   lines.push('🙏 Thank you for your business!');
 
   return lines.join('\n');
+}
+
+/**
+ * Download formatted invoice text receipt as a file
+ */
+export function downloadReceiptFile(sale: Sale, receiptText: string) {
+  const invoiceNum = sale.invoiceNumber || sale.id.substring(0, 8);
+  const blob = new Blob([receiptText], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `Invoice-${invoiceNum}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 /**

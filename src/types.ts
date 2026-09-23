@@ -61,6 +61,15 @@ export interface Product {
   expiryDate?: string; // YYYY-MM-DD
   batchNumber?: string;
   variants?: ProductVariant[];
+  status?: 'active' | 'archived';
+  isArchived?: boolean;
+  archivedAt?: string;
+  archivedBy?: string;
+  archivedReason?: string;
+  restoredAt?: string;
+  restoredBy?: string;
+  deletedAt?: string;
+  deletedBy?: string;
 }
 
 export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Bank' | 'Credit' | 'Split';
@@ -73,12 +82,18 @@ export interface PaymentSplit {
 export interface SaleItem {
   productId: string;
   productName: string;
+  productNameSnapshot?: string; // Frozen name at time of sale
   quantity: number;
   sellingPrice?: number;
   buyingPrice?: number;
-  unitPrice?: number; // Optional alias for sellingPrice
-  subtotal?: number;  // Optional alias for total
+  unitPrice?: number; // Snapshot unit price
+  costPriceSnapshot?: number; // Frozen buying cost per unit at time of sale
+  subtotal?: number;  // Frozen item subtotal (quantity * unitPrice)
   total?: number;
+  profit?: number;    // Frozen item profit
+  barcode?: string;
+  variantId?: string;
+  variantName?: string;
 }
 
 export interface Sale {
@@ -87,6 +102,8 @@ export interface Sale {
   receiptNumber?: string;
   items: SaleItem[];
   totalAmount: number;
+  subtotal?: number;
+  discount?: number;
   totalCost?: number;
   profit?: number;
   paymentMethod: PaymentMethod;
@@ -360,10 +377,72 @@ export interface ArchivedBusinessPeriod {
   activityLogs?: BusinessActivityLogEntry[];
 }
 
-export type StaffRole = 'Cashier' | 'Manager' | 'Owner';
+export type StaffRole = 'Cashier' | 'Staff' | 'Accountant' | 'Manager' | 'Owner';
+
+export interface StaffInvitation {
+  invitationId: string;
+  token: string;
+  tokenHash?: string;
+  businessId: string;
+  businessName: string;
+  invitedByUserId?: string;
+  invitedByUserName?: string;
+  invitedByUserEmail?: string;
+  invitedBy?: {
+    uid: string;
+    name: string;
+    email?: string;
+    role?: string;
+  };
+  invitedRole: StaffRole;
+  assignedRole: StaffRole; // Maintained for backward compatibility
+  permissions: StaffPermissions;
+  workerName?: string;
+  workerEmail?: string;
+  createdAt: string;
+  expiresAt: string;
+  status: 'pending' | 'accepted' | 'cancelled' | 'expired' | 'revoked';
+  acceptedAt?: string;
+  acceptedByUserId?: string;
+  acceptedByEmail?: string;
+  cancelledAt?: string;
+  cancelledByUserId?: string;
+  usedBy?: string; // Legacy fallback
+  usedAt?: string; // Legacy fallback
+}
+
+export interface BusinessMember {
+  id: string; // `${businessId}_${userId}`
+  businessId: string;
+  businessName: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  role: StaffRole;
+  permissions: StaffPermissions;
+  status: 'active' | 'disabled';
+  invitedBy: {
+    uid?: string;
+    userId?: string;
+    name: string;
+    email?: string;
+  };
+  invitationId: string;
+  joinedAt: string;
+  updatedAt?: string;
+}
 
 export interface StaffPermissions {
-  // Cashier default permissions
+  // Core Requirement 7 High-Level Permissions
+  createSales: boolean;
+  viewProducts: boolean;
+  editProducts: boolean;
+  viewProfit: boolean;
+  viewExpenses: boolean;
+  manageStaff: boolean;
+  businessSettings: boolean;
+
+  // Granular Cashier & Operations Permissions
   canRecordSales: boolean;
   canViewProductsForSelling: boolean;
   canViewStockAvailability: boolean;
@@ -376,20 +455,21 @@ export interface StaffPermissions {
   canEditCompletedSales: boolean;
   canDeleteCustomers: boolean;
   canDeleteProducts: boolean;
+  canArchiveProducts?: boolean;
+  canRestoreProducts?: boolean;
   canChangeProductPrices: boolean;
   canChangeStock: boolean;
   canDeleteExpenses: boolean;
   canDeleteSupplierRecords: boolean;
 
-  // Owner-only information
-  canViewProfit: boolean;
+  // Owner-only information & Reporting
+  canViewProfit?: boolean;
+  canViewExpenses?: boolean;
   canViewReports: boolean;
-  canViewExpenses: boolean;
   canViewSupplierBalances: boolean;
   canManageSuppliers?: boolean;
   canViewBusinessFinancialSummary: boolean;
   canViewAIBusinessAnalysis: boolean;
-  canManageStaff: boolean;
   canAccessBusinessSettings: boolean;
 }
 
@@ -472,6 +552,14 @@ export interface StaffSession {
 }
 
 export const DEFAULT_CASHIER_PERMISSIONS: StaffPermissions = {
+  createSales: true,
+  viewProducts: true,
+  editProducts: false,
+  viewProfit: false,
+  viewExpenses: false,
+  manageStaff: false,
+  businessSettings: false,
+
   canRecordSales: true,
   canViewProductsForSelling: true,
   canViewStockAvailability: true,
@@ -483,6 +571,8 @@ export const DEFAULT_CASHIER_PERMISSIONS: StaffPermissions = {
   canEditCompletedSales: false,
   canDeleteCustomers: false,
   canDeleteProducts: false,
+  canArchiveProducts: false,
+  canRestoreProducts: false,
   canChangeProductPrices: false,
   canChangeStock: false,
   canDeleteExpenses: false,
@@ -494,11 +584,90 @@ export const DEFAULT_CASHIER_PERMISSIONS: StaffPermissions = {
   canViewSupplierBalances: false,
   canViewBusinessFinancialSummary: false,
   canViewAIBusinessAnalysis: false,
-  canManageStaff: false,
+  canAccessBusinessSettings: false,
+};
+
+export const DEFAULT_STAFF_PERMISSIONS: StaffPermissions = {
+  createSales: true,
+  viewProducts: true,
+  editProducts: false,
+  viewProfit: false,
+  viewExpenses: false,
+  manageStaff: false,
+  businessSettings: false,
+
+  canRecordSales: true,
+  canViewProductsForSelling: true,
+  canViewStockAvailability: true,
+  canCreateViewReceipts: true,
+  canSelectPaymentMethod: true,
+  canSelectCustomerForSale: true,
+
+  canDeleteSales: false,
+  canEditCompletedSales: false,
+  canDeleteCustomers: false,
+  canDeleteProducts: false,
+  canArchiveProducts: false,
+  canRestoreProducts: false,
+  canChangeProductPrices: false,
+  canChangeStock: false,
+  canDeleteExpenses: false,
+  canDeleteSupplierRecords: false,
+
+  canViewProfit: false,
+  canViewReports: false,
+  canViewExpenses: false,
+  canViewSupplierBalances: false,
+  canViewBusinessFinancialSummary: false,
+  canViewAIBusinessAnalysis: false,
+  canAccessBusinessSettings: false,
+};
+
+export const DEFAULT_ACCOUNTANT_PERMISSIONS: StaffPermissions = {
+  createSales: false,
+  viewProducts: true,
+  editProducts: false,
+  viewProfit: true,
+  viewExpenses: true,
+  manageStaff: false,
+  businessSettings: false,
+
+  canRecordSales: false,
+  canViewProductsForSelling: true,
+  canViewStockAvailability: true,
+  canCreateViewReceipts: true,
+  canSelectPaymentMethod: true,
+  canSelectCustomerForSale: true,
+
+  canDeleteSales: false,
+  canEditCompletedSales: false,
+  canDeleteCustomers: false,
+  canDeleteProducts: false,
+  canArchiveProducts: false,
+  canRestoreProducts: false,
+  canChangeProductPrices: false,
+  canChangeStock: false,
+  canDeleteExpenses: false,
+  canDeleteSupplierRecords: false,
+
+  canViewProfit: true,
+  canViewReports: true,
+  canViewExpenses: true,
+  canViewSupplierBalances: true,
+  canViewBusinessFinancialSummary: true,
+  canViewAIBusinessAnalysis: false,
   canAccessBusinessSettings: false,
 };
 
 export const DEFAULT_MANAGER_PERMISSIONS: StaffPermissions = {
+  createSales: true,
+  viewProducts: true,
+  editProducts: true,
+  viewProfit: true,
+  viewExpenses: true,
+  manageStaff: true,
+  businessSettings: false,
+
   canRecordSales: true,
   canViewProductsForSelling: true,
   canViewStockAvailability: true,
@@ -510,6 +679,8 @@ export const DEFAULT_MANAGER_PERMISSIONS: StaffPermissions = {
   canEditCompletedSales: true,
   canDeleteCustomers: false,
   canDeleteProducts: false,
+  canArchiveProducts: true,
+  canRestoreProducts: true,
   canChangeProductPrices: true,
   canChangeStock: true,
   canDeleteExpenses: false,
@@ -521,11 +692,18 @@ export const DEFAULT_MANAGER_PERMISSIONS: StaffPermissions = {
   canViewSupplierBalances: true,
   canViewBusinessFinancialSummary: true,
   canViewAIBusinessAnalysis: false,
-  canManageStaff: false,
   canAccessBusinessSettings: false,
 };
 
 export const DEFAULT_OWNER_PERMISSIONS: StaffPermissions = {
+  createSales: true,
+  viewProducts: true,
+  editProducts: true,
+  viewProfit: true,
+  viewExpenses: true,
+  manageStaff: true,
+  businessSettings: true,
+
   canRecordSales: true,
   canViewProductsForSelling: true,
   canViewStockAvailability: true,
@@ -537,6 +715,8 @@ export const DEFAULT_OWNER_PERMISSIONS: StaffPermissions = {
   canEditCompletedSales: true,
   canDeleteCustomers: true,
   canDeleteProducts: true,
+  canArchiveProducts: true,
+  canRestoreProducts: true,
   canChangeProductPrices: true,
   canChangeStock: true,
   canDeleteExpenses: true,
@@ -548,6 +728,5 @@ export const DEFAULT_OWNER_PERMISSIONS: StaffPermissions = {
   canViewSupplierBalances: true,
   canViewBusinessFinancialSummary: true,
   canViewAIBusinessAnalysis: true,
-  canManageStaff: true,
   canAccessBusinessSettings: true,
 };

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Settings as SettingsIcon, 
   Building2, 
@@ -27,15 +27,20 @@ import {
   Flame,
   Users,
   UserPlus,
-  AlertCircle
+  AlertCircle,
+  ShieldAlert,
+  Loader2
 } from 'lucide-react';
-import { BusinessProfile, CurrencyCode, BusinessType, ArchivedBusinessPeriod, StaffMember } from '../types';
+import { BusinessProfile, CurrencyCode, BusinessType, ArchivedBusinessPeriod, StaffMember, StaffSession } from '../types';
 import { formatCurrency } from '../utils/calculations';
 import { auth, linkGoogleToCurrentUser } from '../firebase';
+import { isVerifiedOwnerOrDeveloper } from '../utils/devMode';
 import { CreatePasswordModal } from './CreatePasswordModal';
 import { DeleteArchivedPeriodModal } from './DeleteArchivedPeriodModal';
 import { 
   inspectDomainEnvironment, 
+  fetchProtectedDomainConfig,
+  ProtectedDomainConfig,
   PRODUCTION_CUSTOM_DOMAIN, 
   PRODUCTION_CUSTOM_DOMAIN_URL, 
   FIREBASE_PROJECT_ID,
@@ -60,6 +65,9 @@ interface SettingsModalProps {
   onChangeCashierPin?: () => void;
   onOpenFirebaseConsole?: () => void;
   isDevOrOwner?: boolean;
+  currentUser?: any;
+  staffSession?: StaffSession | null;
+  initialTab?: 'business' | 'preferences' | 'security' | 'staff' | 'domain';
   staffList?: StaffMember[];
   onOpenStaffManagement?: () => void;
   onToggleStaffStatus?: (staffId: string) => void;
@@ -80,11 +88,72 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onChangeCashierPin,
   onOpenFirebaseConsole,
   isDevOrOwner = false,
+  currentUser,
+  staffSession,
+  initialTab,
   staffList = [],
   onOpenStaffManagement,
   onToggleStaffStatus,
 }) => {
-  const [activeTab, setActiveTab] = useState<'business' | 'preferences' | 'security' | 'staff' | 'domain'>('business');
+  // Strict Owner & Developer Authorization:
+  // ONLY verified App Developer / Super Admin OR verified Business Owner can access.
+  // Everyone else (Manager, Cashier, Staff, Accountant, Shared user, etc.) has ZERO access.
+  const isDomainAuthorized = isVerifiedOwnerOrDeveloper(
+    currentUser || auth?.currentUser,
+    profile?.id,
+    isCashierMode || !!staffSession
+  );
+
+  const [activeTab, setActiveTab] = useState<'business' | 'preferences' | 'security' | 'domain'>(() => {
+    if (initialTab === 'domain' && isDomainAuthorized) return 'domain';
+    if (initialTab && initialTab !== 'domain' && initialTab !== 'staff') return initialTab;
+    return 'business';
+  });
+
+  const [protectedDomainData, setProtectedDomainData] = useState<ProtectedDomainConfig | null>(null);
+  const [isDomainLoading, setIsDomainLoading] = useState<boolean>(false);
+  const [domainError, setDomainError] = useState<string | null>(null);
+
+  // If unauthorized user lands on domain tab, immediately redirect them to normal Business Settings
+  useEffect(() => {
+    if (activeTab === 'domain' && !isDomainAuthorized) {
+      setActiveTab('business');
+    }
+  }, [activeTab, isDomainAuthorized]);
+
+  // Fetch verified domain configuration from the backend security API
+  useEffect(() => {
+    if (activeTab !== 'domain' || !isDomainAuthorized) return;
+    let isMounted = true;
+    setIsDomainLoading(true);
+    setDomainError(null);
+
+    (async () => {
+      try {
+        const idToken = auth?.currentUser ? await auth.currentUser.getIdToken() : null;
+        const res = await fetchProtectedDomainConfig(idToken, profile?.id);
+        if (!isMounted) return;
+        if (res.authorized && res.data) {
+          setProtectedDomainData(res.data);
+        } else {
+          setDomainError(res.error || 'Access Restricted: This area is available only to the Business Owner.');
+        }
+      } catch {
+        if (isMounted) {
+          setDomainError('Access Restricted: This area is available only to the Business Owner.');
+        }
+      } finally {
+        if (isMounted) {
+          setIsDomainLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeTab, isDomainAuthorized, profile?.id]);
+
   const [periodToDelete, setPeriodToDelete] = useState<ArchivedBusinessPeriod | null>(null);
   const [deletedToast, setDeletedToast] = useState<string | null>(null);
   const [copiedDomainField, setCopiedDomainField] = useState<string | null>(null);
@@ -234,41 +303,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </button>
 
-          <button
-            id="settings-tab-staff"
-            type="button"
-            onClick={() => setActiveTab('staff')}
-            className={`px-4 py-2.5 rounded-t-xl border-b-2 transition-colors cursor-pointer flex items-center gap-2 ${
-              activeTab === 'staff'
-                ? 'border-emerald-600 text-emerald-700 font-bold bg-white'
-                : 'border-transparent text-slate-500 hover:text-slate-900 hover:bg-slate-100'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            <span>Staff</span>
-            {staffList.length > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
-                {staffList.length}
+          {/* TAB 4: CUSTOM DOMAIN & URL - STRICT HIGH-PRIVILEGE OWNER/DEVELOPER ACCESS ONLY */}
+          {isDomainAuthorized && (
+            <button
+              id="settings-tab-domain"
+              type="button"
+              onClick={() => setActiveTab('domain')}
+              className={`px-4 py-2.5 rounded-t-xl border-b-2 transition-colors cursor-pointer flex items-center gap-2 ${
+                activeTab === 'domain'
+                  ? 'border-emerald-600 text-emerald-700 font-bold bg-white'
+                  : 'border-transparent text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Globe className="w-4 h-4 text-emerald-600" />
+              <span>Custom Domain &amp; URL</span>
+              <span className="px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                .rw Ready
               </span>
-            )}
-          </button>
-
-          <button
-            id="settings-tab-domain"
-            type="button"
-            onClick={() => setActiveTab('domain')}
-            className={`px-4 py-2.5 rounded-t-xl border-b-2 transition-colors cursor-pointer flex items-center gap-2 ${
-              activeTab === 'domain'
-                ? 'border-emerald-600 text-emerald-700 font-bold bg-white'
-                : 'border-transparent text-slate-500 hover:text-slate-900 hover:bg-slate-100'
-            }`}
-          >
-            <Globe className="w-4 h-4 text-emerald-600" />
-            <span>Custom Domain &amp; URL</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
-              .rw Ready
-            </span>
-          </button>
+            </button>
+          )}
         </div>
 
         {/* Content Body */}
@@ -862,133 +915,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             );
           })()}
 
-          {/* TAB: STAFF MANAGEMENT */}
-          {activeTab === 'staff' && (
-            <div id="settings-staff-section" className="space-y-6 animate-fade-in">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded-2xl bg-slate-50 border border-slate-200">
-                <div>
-                  <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2 font-['Outfit',sans-serif]">
-                    <Users className="w-5 h-5 text-indigo-600" />
-                    <span>STAFF MEMBERS</span>
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Manage staff cashiers, control permissions, share access links, and audit sales activities.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  id="settings-btn-add-staff"
-                  onClick={onOpenStaffManagement}
-                  className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-200 flex items-center justify-center gap-2 cursor-pointer transition-all shrink-0"
-                >
-                  <UserPlus className="w-4 h-4" />
-                  <span>+ Add Staff</span>
-                </button>
-              </div>
-
-              {/* Staff Cards List */}
-              <div className="space-y-3">
-                {staffList.length === 0 ? (
-                  <div className="text-center py-10 rounded-2xl bg-white border border-dashed border-slate-200 p-6">
-                    <Users className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                    <h4 className="text-sm font-bold text-slate-700">No Staff Members Added</h4>
-                    <p className="text-xs text-slate-400 mt-1 mb-3">
-                      Add cashiers to let them ring up sales in Staff Mode without viewing your profits or reports.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={onOpenStaffManagement}
-                      className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold"
-                    >
-                      + Add First Staff Member
-                    </button>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 gap-3">
-                    {staffList.map((member) => (
-                      <div
-                        key={member.id}
-                        className={`p-4 rounded-2xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                          member.status === 'ACTIVE'
-                            ? 'bg-white border-slate-200 shadow-xs'
-                            : 'bg-slate-50 border-slate-200 opacity-75'
-                        }`}
-                      >
-                        <div className="flex items-center gap-3.5">
-                          <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-sm font-bold ${
-                            member.status === 'ACTIVE'
-                              ? 'bg-indigo-100 text-indigo-700'
-                              : 'bg-slate-200 text-slate-600'
-                          }`}>
-                            {member.name.charAt(0).toUpperCase()}
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <h4 className="text-sm font-bold text-slate-900 font-['Outfit',sans-serif]">
-                                {member.name}
-                              </h4>
-                              {member.status === 'ACTIVE' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                  <span>🟢</span> Active
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
-                                  <span>🔴</span> Disabled
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-slate-500 mt-0.5">
-                              Role: <span className="font-semibold text-slate-700">{member.role}</span>
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-2 self-end sm:self-center">
-                          <button
-                            type="button"
-                            onClick={onOpenStaffManagement}
-                            className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition-colors cursor-pointer"
-                          >
-                            Manage
-                          </button>
-
-                          {onToggleStaffStatus && (
-                            <button
-                              type="button"
-                              onClick={() => onToggleStaffStatus(member.id)}
-                              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-                                member.status === 'ACTIVE'
-                                  ? 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200'
-                                  : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200'
-                              }`}
-                            >
-                              {member.status === 'ACTIVE' ? 'Disable' : 'Enable'}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Open Full Staff Hub */}
-                <div className="pt-2 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={onOpenStaffManagement}
-                    className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 cursor-pointer"
-                  >
-                    <span>Open Full Staff Hub &amp; Activity Log</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* TAB 4: CUSTOM DOMAIN & PUBLIC URL */}
           {activeTab === 'domain' && (() => {
+            // Strict Zero-Trust Authorization: Non-owners/non-developers receive access restricted notice without leaking URLs
+            if (!isDomainAuthorized || domainError) {
+              return (
+                <div className="p-8 text-center space-y-4 max-w-md mx-auto animate-fade-in my-8">
+                  <div className="w-14 h-14 rounded-2xl bg-rose-50 text-rose-600 border border-rose-100 flex items-center justify-center mx-auto shadow-sm">
+                    <ShieldAlert className="w-7 h-7" />
+                  </div>
+                  <div className="space-y-1">
+                    <h4 className="text-lg font-bold text-slate-900 font-['Outfit',sans-serif]">Access Restricted</h4>
+                    <p className="text-sm text-slate-600 leading-relaxed">
+                      This area is available only to the Business Owner.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('business')}
+                    className="mt-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
+                  >
+                    Return to Business Settings
+                  </button>
+                </div>
+              );
+            }
+
+            if (isDomainLoading || !protectedDomainData) {
+              return (
+                <div className="p-12 text-center space-y-3 animate-fade-in my-8">
+                  <Loader2 className="w-8 h-8 text-emerald-600 animate-spin mx-auto" />
+                  <div className="text-sm font-bold text-slate-700">Verifying Owner Authorization &amp; Domain Routing...</div>
+                  <div className="text-xs text-slate-400">Authenticating with backend security server</div>
+                </div>
+              );
+            }
+
             const domainInfo = inspectDomainEnvironment();
             const copyText = (text: string, id: string) => {
               navigator.clipboard.writeText(text);
@@ -1009,7 +971,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <div className="flex items-center gap-2">
                           <h4 className="font-bold text-lg font-['Outfit',sans-serif]">Firebase Hosting URL</h4>
                           <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold border border-amber-500/30 font-mono">
-                            {FIREBASE_PROJECT_ID}
+                            {protectedDomainData.firebaseProjectId}
                           </span>
                         </div>
                         <p className="text-xs text-slate-300 mt-0.5">
@@ -1020,7 +982,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                     <button
                       type="button"
-                      onClick={() => copyText(FIREBASE_HOSTING_URL, 'fb-hosting')}
+                      onClick={() => copyText(protectedDomainData.firebaseHostingUrl, 'fb-hosting')}
                       className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
                     >
                       {copiedDomainField === 'fb-hosting' ? (
@@ -1041,11 +1003,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <div className="flex items-center gap-2 overflow-hidden">
                       <span className="text-xs text-amber-300/80 shrink-0">Hosting URL:</span>
                       <code className="text-sm font-mono font-bold text-amber-400 truncate select-all">
-                        {FIREBASE_HOSTING_URL}
+                        {protectedDomainData.firebaseHostingUrl}
                       </code>
                     </div>
                     <a
-                      href={FIREBASE_HOSTING_URL}
+                      href={protectedDomainData.firebaseHostingUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="text-xs text-amber-200 hover:text-white flex items-center gap-1 shrink-0 cursor-pointer"
@@ -1078,7 +1040,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                     <button
                       type="button"
-                      onClick={() => copyText(domainInfo.activeProductionUrl, 'prod-domain')}
+                      onClick={() => copyText(protectedDomainData.activeProductionUrl, 'prod-domain')}
                       className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
                     >
                       {copiedDomainField === 'prod-domain' ? (
@@ -1099,11 +1061,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <div className="flex items-center gap-2 overflow-hidden">
                       <span className="text-xs text-slate-400 shrink-0">Live URL:</span>
                       <code className="text-sm font-mono font-bold text-emerald-400 truncate select-all">
-                        {domainInfo.activeProductionUrl}
+                        {protectedDomainData.activeProductionUrl}
                       </code>
                     </div>
                     <a
-                      href={domainInfo.activeProductionUrl}
+                      href={protectedDomainData.activeProductionUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="text-xs text-slate-300 hover:text-white flex items-center gap-1 shrink-0 cursor-pointer"
@@ -1116,7 +1078,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {/* Custom Domain Status banner */}
                   <div className="pt-2 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                     <div className="flex items-center gap-2">
-                      <span className="text-slate-400">Custom Domain (smartledger.rw):</span>
+                      <span className="text-slate-400">Custom Domain ({protectedDomainData.customDomain}):</span>
                       {domainInfo.isCustomDomainActive ? (
                         <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-400">
                           <CheckCircle2 className="w-3.5 h-3.5" /> Connected &amp; Verified
@@ -1176,7 +1138,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <span>Firebase Auth Domain Whitelist</span>
                       </h5>
                       <p className="text-xs text-purple-800 mt-1 leading-relaxed">
-                        To ensure Google Sign-In, password resets, and session tokens function seamlessly on <code className="font-bold font-mono">smartledger.rw</code>, these domains must be authorized in your Firebase console:
+                        To ensure Google Sign-In, password resets, and session tokens function seamlessly on <code className="font-bold font-mono">{protectedDomainData.customDomain}</code>, these domains must be authorized in your Firebase console:
                       </p>
                     </div>
 
@@ -1192,32 +1154,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
 
                   <div className="space-y-2 pt-1">
-                    {[
-                      { domain: FIREBASE_HOSTING_DOMAIN, label: 'Firebase Hosting (Primary)' },
-                      { domain: FIREBASE_APP_DOMAIN, label: 'Firebase App Domain' },
-                      { domain: 'smartledger.rw', label: 'Apex Domain' },
-                      { domain: 'www.smartledger.rw', label: 'Subdomain' },
-                      { domain: domainInfo.currentHostname, label: 'Active Deployment Host' }
-                    ].filter((item, index, self) => self.findIndex(t => t.domain === item.domain) === index).map(item => (
-                      <div key={item.domain} className="flex items-center justify-between p-2 bg-white rounded-xl border border-purple-100 text-xs">
+                    {protectedDomainData.authorizedDomains.map(domain => (
+                      <div key={domain} className="flex items-center justify-between p-2 bg-white rounded-xl border border-purple-100 text-xs">
                         <div className="flex items-center gap-2 overflow-hidden">
                           <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>
-                          <code className="font-mono font-bold text-slate-800 truncate">{item.domain}</code>
-                          <span className="text-[10px] text-slate-400">({item.label})</span>
+                          <code className="font-mono font-bold text-slate-800 truncate">{domain}</code>
                         </div>
                         <button
                           type="button"
-                          onClick={() => copyText(item.domain, `copy-${item.domain}`)}
+                          onClick={() => copyText(domain, `copy-${domain}`)}
                           className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[10px] flex items-center gap-1 cursor-pointer shrink-0"
                         >
-                          {copiedDomainField === `copy-${item.domain}` ? (
+                          {copiedDomainField === `copy-${domain}` ? (
                             <>
-                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                               <span>Copied</span>
                             </>
                           ) : (
                             <>
-                              <Copy className="w-3 h-3" />
+                              <Copy className="w-3.5 h-3.5" />
                               <span>Copy</span>
                             </>
                           )}
@@ -1231,36 +1186,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
                   <h5 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
                     <Globe className="w-4 h-4 text-emerald-600" />
-                    <span>DNS Configuration Guide for {PRODUCTION_CUSTOM_DOMAIN}</span>
+                    <span>DNS Configuration Guide for {protectedDomainData.customDomain}</span>
                   </h5>
                   <p className="text-xs text-slate-600 leading-relaxed">
                     When connecting your domain with your registrar (such as RICTA, Webhost Rwanda, or Cloudflare), configure these DNS records:
                   </p>
 
                   <div className="space-y-2 text-xs font-mono">
-                    <div className="p-3 bg-white rounded-xl border border-slate-200 space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-indigo-600 font-bold">Record 1: CNAME (Subdomain)</span>
-                        <span className="text-[10px] text-slate-400 font-sans">Recommended</span>
+                    {protectedDomainData.dnsRecords.map((record, idx) => (
+                      <div key={idx} className="p-3 bg-white rounded-xl border border-slate-200 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-indigo-600 font-bold">{record.label}</span>
+                          {record.recommended && (
+                            <span className="text-[10px] text-slate-400 font-sans">Recommended</span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-slate-700 text-[11px] pt-1">
+                          <div><span className="text-slate-400">Type:</span> {record.type}</div>
+                          <div><span className="text-slate-400">Host:</span> {record.host}</div>
+                          <div className="truncate"><span className="text-slate-400">Target:</span> {record.target}</div>
+                        </div>
                       </div>
-                      <div className="grid grid-cols-3 gap-2 text-slate-700 text-[11px] pt-1">
-                        <div><span className="text-slate-400">Type:</span> CNAME</div>
-                        <div><span className="text-slate-400">Host:</span> www</div>
-                        <div className="truncate"><span className="text-slate-400">Target:</span> ghs.googlehosted.com</div>
-                      </div>
-                    </div>
-
-                    <div className="p-3 bg-white rounded-xl border border-slate-200 space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-indigo-600 font-bold">Record 2: Apex Forwarding / A Record</span>
-                        <span className="text-[10px] text-slate-400 font-sans">Root Domain</span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-2 text-slate-700 text-[11px] pt-1">
-                        <div><span className="text-slate-400">Type:</span> A / Redirect</div>
-                        <div><span className="text-slate-400">Host:</span> @ (root)</div>
-                        <div className="truncate"><span className="text-slate-400">Target:</span> Forward to https://www.smartledger.rw</div>
-                      </div>
-                    </div>
+                    ))}
                   </div>
                 </div>
               </div>

@@ -60,6 +60,38 @@
       },
       "required": ["userId", "profile"]
     },
+    "Product": {
+      "title": "Product",
+      "description": "Inventory product item supporting safe archiving to preserve historical sales and financial integrity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "buyingPrice": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "costPrice": { "type": "number" },
+        "stock": { "type": "number" },
+        "minStockLevel": { "type": "number" },
+        "barcode": { "type": "string" },
+        "supplier": { "type": "string" },
+        "notes": { "type": "string" },
+        "unit": { "type": "string" },
+        "expiryDate": { "type": "string" },
+        "batchNumber": { "type": "string" },
+        "variants": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "isArchived": { "type": "boolean" },
+        "archivedAt": { "type": "string" },
+        "archivedBy": { "type": "string" },
+        "archivedReason": { "type": "string" },
+        "restoredAt": { "type": "string" },
+        "restoredBy": { "type": "string" },
+        "deletedAt": { "type": "string" },
+        "deletedBy": { "type": "string" }
+      },
+      "required": ["id", "name", "category", "sellingPrice", "stock"]
+    },
     "StaffMember": {
       "title": "StaffMember",
       "description": "Staff profile, role preset, and granular permission controls managed by business owner",
@@ -136,9 +168,114 @@
         "timestamp": { "type": "string" }
       },
       "required": ["workspaceId", "type", "title", "timestamp"]
+    },
+    "DomainSettings": {
+      "title": "DomainSettings",
+      "description": "Protected custom domain, Firebase hosting URLs, and DNS routing records accessible only by verified App Developer and Business Owner",
+      "type": "object",
+      "properties": {
+        "customDomain": { "type": "string" },
+        "customDomainUrl": { "type": "string" },
+        "firebaseProjectId": { "type": "string" },
+        "firebaseHostingDomain": { "type": "string" },
+        "firebaseHostingUrl": { "type": "string" },
+        "activeProductionUrl": { "type": "string" },
+        "dnsRecords": { "type": "array" },
+        "authorizedDomains": { "type": "array" }
+      },
+      "required": ["customDomain", "firebaseHostingUrl"]
+    },
+    "StaffInvitation": {
+      "title": "StaffInvitation",
+      "description": "Cryptographically secure, single-use invitation record for staff onboarding",
+      "type": "object",
+      "properties": {
+        "invitationId": { "type": "string" },
+        "token": { "type": "string" },
+        "tokenHash": { "type": "string" },
+        "businessId": { "type": "string" },
+        "businessName": { "type": "string" },
+        "invitedByUserId": { "type": "string" },
+        "invitedByUserName": { "type": "string" },
+        "invitedByUserEmail": { "type": "string" },
+        "invitedBy": { "type": "object" },
+        "invitedRole": { "type": "string", "enum": ["Cashier", "Staff", "Accountant", "Manager"] },
+        "assignedRole": { "type": "string", "enum": ["Cashier", "Staff", "Accountant", "Manager"] },
+        "permissions": { "type": "object" },
+        "workerName": { "type": "string" },
+        "workerEmail": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "cancelled", "expired", "revoked"] },
+        "acceptedAt": { "type": "string" },
+        "acceptedByUserId": { "type": "string" },
+        "acceptedByEmail": { "type": "string" },
+        "cancelledAt": { "type": "string" },
+        "cancelledByUserId": { "type": "string" },
+        "usedBy": { "type": "string" },
+        "usedAt": { "type": "string" }
+      },
+      "required": ["invitationId", "token", "businessId", "assignedRole", "status", "expiresAt"]
+    },
+    "BusinessMember": {
+      "title": "BusinessMember",
+      "description": "Active or disabled staff membership binding a verified user account to a business workspace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "businessId": { "type": "string" },
+        "businessName": { "type": "string" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "role": { "type": "string", "enum": ["Cashier", "Staff", "Accountant", "Manager", "Owner"] },
+        "permissions": { "type": "object" },
+        "status": { "type": "string", "enum": ["active", "disabled"] },
+        "invitedBy": { "type": "object" },
+        "invitationId": { "type": "string" },
+        "joinedAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "businessId", "userId", "role", "status"]
     }
   },
   "firestore": {
+    "/staffInvitations/{token}": {
+      "schema": {
+        "$ref": "#/entities/StaffInvitation"
+      },
+      "description": "Primary single-use staff invitations looked up by unique unguessable token"
+    },
+    "/staff_invitations/{token}": {
+      "schema": {
+        "$ref": "#/entities/StaffInvitation"
+      },
+      "description": "Secure single-use staff invitations looked up by unique unguessable token"
+    },
+    "/businesses/{businessId}/members/{userId}": {
+      "schema": {
+        "$ref": "#/entities/BusinessMember"
+      },
+      "description": "Primary business members collection nested under business workspace"
+    },
+    "/business_members/{membershipId}": {
+      "schema": {
+        "$ref": "#/entities/BusinessMember"
+      },
+      "description": "Authoritative business memberships mapping staff accounts to workspaces"
+    },
+    "/system_config/domain_settings": {
+      "schema": {
+        "$ref": "#/entities/DomainSettings"
+      },
+      "description": "High-privilege system domain configuration accessible exclusively by verified super admin"
+    },
+    "/users/{userId}/private_admin/{docId}": {
+      "schema": {
+        "$ref": "#/entities/DomainSettings"
+      },
+      "description": "Protected private admin domain and URL settings accessible strictly by the verified business owner"
+    },
     "/users/{userId}": {
       "schema": {
         "$ref": "#/entities/UserWorkspace"

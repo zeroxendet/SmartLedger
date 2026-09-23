@@ -1,25 +1,50 @@
-import React, { useState } from 'react';
-import { Product, PaymentMethod, PaymentSplit, Sale, Customer, CurrencyCode, BusinessProfile } from '../types';
-import { formatCurrency } from '../utils/calculations';
-import { generateWhatsAppReceiptText, openWhatsAppReceipt } from '../utils/receiptUtils';
+import React, { useState, useEffect } from 'react';
+import { 
+  Product, 
+  Sale, 
+  SaleItem, 
+  Customer, 
+  CurrencyCode, 
+  PaymentMethod, 
+  PaymentSplit,
+  BusinessProfile,
+  ProductVariant
+} from '../types';
+import { formatCurrency, generateWhatsAppReceiptText, openWhatsAppReceipt } from '../utils/calculations';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
-import { ReceiptModal } from './ReceiptModal';
+import { 
+  findProductByBarcode, 
+  useBarcodeKeyboardScanner,
+  playBarcodeSuccessFeedback 
+} from '../utils/barcodeUtils';
 import { 
   X, 
   Search, 
   Plus, 
   Minus, 
+  Trash2, 
   CheckCircle2, 
-  AlertTriangle, 
-  Printer, 
   Share2, 
+  Copy, 
+  AlertTriangle, 
+  Barcode, 
+  Camera, 
+  ShoppingBag,
+  Sparkles,
   ArrowRight,
-  UserPlus,
-  Barcode,
-  Send,
-  FileText,
-  Check
+  RefreshCw,
+  Layers
 } from 'lucide-react';
+
+export interface CartItem {
+  id: string; // unique item id in cart
+  product: Product;
+  variantId?: string;
+  variantName?: string;
+  quantity: number;
+  unitPrice: number;
+  unitCost: number;
+}
 
 interface SellModalProps {
   isOpen: boolean;
@@ -29,8 +54,12 @@ interface SellModalProps {
   currency: CurrencyCode;
   allowCustomerCredit: boolean;
   profile?: BusinessProfile;
+  initialProduct?: Product | null;
+  initialQuantity?: number;
+  initialVariant?: ProductVariant | null;
   onCompleteSale: (sale: Sale, restockQuantityIfProduced?: number) => void;
-  onAddCustomer: (name: string, phone?: string) => string; // returns customerId
+  onAddCustomer: (name: string, phone?: string) => string;
+  onAddNewProductWithBarcode?: (barcode: string) => void;
 }
 
 export const SellModal: React.FC<SellModalProps> = ({
@@ -41,56 +70,329 @@ export const SellModal: React.FC<SellModalProps> = ({
   currency,
   allowCustomerCredit,
   profile,
+  initialProduct,
+  initialQuantity,
+  initialVariant,
   onCompleteSale,
   onAddCustomer,
+  onAddNewProductWithBarcode,
 }) => {
+  // Cart state
+  const [cart, setCart] = useState<CartItem[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [quantity, setQuantity] = useState<number>(1);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Cash');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [newCustomerName, setNewCustomerName] = useState<string>('');
-  const [selectedVariantId, setSelectedVariantId] = useState<string>('');
-  
+
+  // Scanner & Modals state
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [unknownBarcodePrompt, setUnknownBarcodePrompt] = useState<string | null>(null);
+  const [copiedToast, setCopiedToast] = useState(false);
+  const [completedSale, setCompletedSale] = useState<Sale | null>(null);
+
   // Split payment state
   const [splitAmounts, setSplitAmounts] = useState<{
     Cash: number;
     'Mobile Money': number;
     Bank: number;
-  }>({
-    Cash: 0,
-    'Mobile Money': 0,
-    Bank: 0,
-  });
+  }>({ Cash: 0, 'Mobile Money': 0, Bank: 0 });
   const [splitAllocationError, setSplitAllocationError] = useState<string | null>(null);
 
-  // Scanner & Receipt modals state
-  const [isScannerOpen, setIsScannerOpen] = useState(false);
-  const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
-  const [copiedToast, setCopiedToast] = useState(false);
-
-  // Stock Error Detection (Step 32)
-  const [stockErrorState, setStockErrorState] = useState<{
-    show: boolean;
+  // Stock Error Alert
+  const [stockAlert, setStockAlert] = useState<{
+    productName: string;
     required: number;
     available: number;
-  }>({ show: false, required: 0, available: 0 });
+  } | null>(null);
 
-  // Completed sale confirmation & invoice view
-  const [completedSale, setCompletedSale] = useState<Sale | null>(null);
+  // Auto-scan feedback banner
+  const [scanToast, setScanToast] = useState<string | null>(null);
+
+  // Reset modal state when closed, or initialize with preselected product when opened
+  useEffect(() => {
+    if (!isOpen) {
+      setCart([]);
+      setSearchTerm('');
+      setStockAlert(null);
+      setUnknownBarcodePrompt(null);
+      setCompletedSale(null);
+      setPaymentMethod('Cash');
+      setSelectedCustomerId('');
+      setNewCustomerName('');
+      setSplitAllocationError(null);
+    } else if (initialProduct) {
+      if (initialProduct.isArchived || initialProduct.status === 'archived') {
+        setCart([]);
+        showScanToast(`Product "${initialProduct.name}" is archived and cannot be sold. Please restore it first.`);
+        return;
+      }
+      const variant = initialVariant;
+      const initialQty = initialQuantity && initialQuantity > 0 ? initialQuantity : 1;
+      const price = variant ? variant.sellingPrice : initialProduct.sellingPrice;
+      const cost = variant
+        ? (variant.costPrice || initialProduct.buyingPrice || initialProduct.costPrice || 0)
+        : (initialProduct.buyingPrice || initialProduct.costPrice || 0);
+      const stock = variant ? variant.stock : initialProduct.stock;
+      const safeQty = stock > 0 ? Math.min(initialQty, stock) : initialQty;
+
+      setCart([
+        {
+          id: variant ? `${initialProduct.id}_${variant.id}` : initialProduct.id,
+          product: initialProduct,
+          variantId: variant?.id,
+          variantName: variant?.name,
+          quantity: safeQty,
+          unitPrice: price,
+          unitCost: cost,
+        },
+      ]);
+    }
+  }, [isOpen, initialProduct, initialQuantity, initialVariant]);
+
+  // Support USB and Bluetooth barcode scanners
+  useBarcodeKeyboardScanner({
+    onScan: (scannedCode) => {
+      if (isOpen && !completedSale) {
+        handleProcessBarcode(scannedCode);
+      }
+    },
+    enabled: isOpen && !isScannerOpen && !completedSale,
+  });
 
   if (!isOpen) return null;
 
-  const filteredProducts = products.filter((p) =>
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.category.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const showScanToast = (msg: string) => {
+    setScanToast(msg);
+    setTimeout(() => setScanToast(null), 2500);
+  };
 
-  const handleProductScanned = (scannedProd: Product) => {
-    setSelectedProduct(scannedProd);
-    setQuantity(1);
-    setStockErrorState({ show: false, required: 0, available: 0 });
-    setIsScannerOpen(false);
+  /**
+   * Core Barcode Processing & Repeated Scanning Logic
+   * Requirement 4: Repeated scanning increments quantity of the existing line item
+   * Requirement 5: Manual quantity adjustment (+/-, direct input)
+   * Requirement 7: Prevent selling more than available stock
+   */
+  const handleProductScanned = (scannedProd: Product, variant?: ProductVariant) => {
+    const availableStock = variant ? variant.stock : scannedProd.stock;
+
+    // Check if product (or variant) is ALREADY in the cart
+    const existingIndex = cart.findIndex((item) => 
+      item.product.id === scannedProd.id && 
+      (variant ? item.variantId === variant.id : !item.variantId)
+    );
+
+    if (existingIndex >= 0) {
+      const existing = cart[existingIndex];
+      const newQty = existing.quantity + 1;
+
+      if (newQty > availableStock) {
+        setStockAlert({
+          productName: scannedProd.name + (variant ? ` (${variant.name})` : ''),
+          required: newQty,
+          available: availableStock,
+        });
+        return;
+      }
+
+      const nextCart = [...cart];
+      nextCart[existingIndex] = {
+        ...existing,
+        quantity: newQty,
+      };
+      setCart(nextCart);
+      setStockAlert(null);
+      showScanToast(`Scanned: ${scannedProd.name} × ${newQty}`);
+    } else {
+      // New item to add to cart
+      if (availableStock <= 0) {
+        setStockAlert({
+          productName: scannedProd.name + (variant ? ` (${variant.name})` : ''),
+          required: 1,
+          available: 0,
+        });
+        return;
+      }
+
+      const unitPrice = variant ? variant.sellingPrice : scannedProd.sellingPrice;
+      const unitCost = scannedProd.buyingPrice || scannedProd.costPrice || 0;
+
+      setCart((prev) => [
+        ...prev,
+        {
+          id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+          product: scannedProd,
+          variantId: variant?.id,
+          variantName: variant?.name,
+          quantity: 1,
+          unitPrice,
+          unitCost,
+        },
+      ]);
+      setStockAlert(null);
+      showScanToast(`Added: ${scannedProd.name} × 1`);
+    }
+
+    playBarcodeSuccessFeedback();
+  };
+
+  const handleProcessBarcode = (code: string) => {
+    const match = findProductByBarcode(products, code);
+    if (match) {
+      if (match.product.isArchived || match.product.status === 'archived') {
+        showScanToast(`Product "${match.product.name}" is archived and cannot be sold.`);
+        return;
+      }
+      handleProductScanned(match.product, match.variant);
+      setUnknownBarcodePrompt(null);
+    } else {
+      setUnknownBarcodePrompt(code);
+    }
+  };
+
+  // Adjust item quantity via buttons or direct input
+  const handleUpdateItemQuantity = (itemId: string, newQtyRaw: number) => {
+    const item = cart.find((i) => i.id === itemId);
+    if (!item) return;
+
+    if (newQtyRaw <= 0) {
+      handleRemoveItem(itemId);
+      return;
+    }
+
+    const availableStock = item.variantId 
+      ? (item.product.variants?.find((v) => v.id === item.variantId)?.stock ?? item.product.stock)
+      : item.product.stock;
+
+    if (newQtyRaw > availableStock) {
+      setStockAlert({
+        productName: item.product.name + (item.variantName ? ` (${item.variantName})` : ''),
+        required: newQtyRaw,
+        available: availableStock,
+      });
+      return;
+    }
+
+    setStockAlert(null);
+    setCart((prev) =>
+      prev.map((i) => (i.id === itemId ? { ...i, quantity: newQtyRaw } : i))
+    );
+  };
+
+  const handleRemoveItem = (itemId: string) => {
+    setCart((prev) => prev.filter((i) => i.id !== itemId));
+    setStockAlert(null);
+  };
+
+  // Calculate cart totals
+  const totalAmount = cart.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
+  const totalCost = cart.reduce((sum, item) => sum + item.unitCost * item.quantity, 0);
+  const totalProfit = totalAmount - totalCost;
+  const totalItemUnits = cart.reduce((sum, item) => sum + item.quantity, 0);
+
+  // Search filter for product catalog picker (active products only)
+  const filteredProducts = products
+    .filter((p) => !p.isArchived && p.status !== 'archived')
+    .filter((p) =>
+      p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.category.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (p.barcode && p.barcode.toLowerCase().includes(searchTerm.toLowerCase()))
+    );
+
+  const handleAttemptCheckout = () => {
+    if (cart.length === 0) return;
+
+    // Final stock verification before checkout
+    for (const item of cart) {
+      const available = item.variantId
+        ? (item.product.variants?.find((v) => v.id === item.variantId)?.stock ?? item.product.stock)
+        : item.product.stock;
+
+      if (item.quantity > available) {
+        setStockAlert({
+          productName: item.product.name + (item.variantName ? ` (${item.variantName})` : ''),
+          required: item.quantity,
+          available,
+        });
+        return;
+      }
+    }
+
+    // Split Payment Validation
+    if (paymentMethod === 'Split') {
+      const allocated = (splitAmounts.Cash || 0) + (splitAmounts['Mobile Money'] || 0) + (splitAmounts.Bank || 0);
+      if (allocated !== totalAmount) {
+        setSplitAllocationError(
+          `Allocated ${formatCurrency(allocated, currency)} does not match total ${formatCurrency(totalAmount, currency)}. Remaining: ${formatCurrency(totalAmount - allocated, currency)}`
+        );
+        return;
+      }
+    }
+
+    setSplitAllocationError(null);
+    finalizeSale();
+  };
+
+  const finalizeSale = () => {
+    let custId = selectedCustomerId;
+    let custName = customers.find((c) => c.id === selectedCustomerId)?.name;
+
+    if (paymentMethod === 'Credit') {
+      if (!custId && newCustomerName.trim()) {
+        custId = onAddCustomer(newCustomerName.trim());
+        custName = newCustomerName.trim();
+      }
+    }
+
+    // Format Sale Items with barcode and variant metadata
+    const saleItems: SaleItem[] = cart.map((item) => ({
+      productId: item.product.id,
+      productName: item.variantName ? `${item.product.name} (${item.variantName})` : item.product.name,
+      quantity: item.quantity,
+      sellingPrice: item.unitPrice,
+      buyingPrice: item.unitCost,
+      unitPrice: item.unitPrice,
+      total: item.unitPrice * item.quantity,
+      barcode: item.product.barcode,
+      variantId: item.variantId,
+      variantName: item.variantName,
+    }));
+
+    // Payment splits
+    let paymentSplits: PaymentSplit[] | undefined = undefined;
+    if (paymentMethod === 'Split') {
+      paymentSplits = [
+        { method: 'Cash' as const, amount: splitAmounts.Cash || 0 },
+        { method: 'Mobile Money' as const, amount: splitAmounts['Mobile Money'] || 0 },
+        { method: 'Bank' as const, amount: splitAmounts.Bank || 0 },
+      ].filter((s) => s.amount > 0);
+    } else if (paymentMethod === 'Cash' || paymentMethod === 'Mobile Money' || paymentMethod === 'Bank') {
+      paymentSplits = [{ method: paymentMethod, amount: totalAmount }];
+    }
+
+    const newSale: Sale = {
+      id: `sale_${Date.now()}`,
+      invoiceNumber: `INV-${Math.floor(1000 + Math.random() * 9000)}`,
+      items: saleItems,
+      totalAmount,
+      totalCost,
+      profit: totalProfit,
+      paymentMethod,
+      paymentSplits,
+      paymentStatus: paymentMethod === 'Credit' ? 'UNPAID' : 'PAID',
+      customerId: paymentMethod === 'Credit' ? custId : undefined,
+      customerName: paymentMethod === 'Credit' ? custName : undefined,
+      date: new Date().toISOString(),
+    };
+
+    // Stock decreases only upon sale completion (Requirement 6)
+    onCompleteSale(newSale, 0);
+    setCompletedSale(newSale);
+  };
+
+  const handleCloseAll = () => {
+    setCart([]);
+    setCompletedSale(null);
+    onClose();
   };
 
   const handleQuickWhatsApp = () => {
@@ -120,764 +422,469 @@ export const SellModal: React.FC<SellModalProps> = ({
     setTimeout(() => setCopiedToast(false), 2000);
   };
 
-  const activeVariant = selectedProduct?.variants?.find((v) => v.id === selectedVariantId);
-  const currentSellingPrice = activeVariant ? activeVariant.sellingPrice : (selectedProduct?.sellingPrice || 0);
-  const currentAvailableStock = activeVariant ? activeVariant.stock : (selectedProduct?.stock || 0);
-
-  const calculateTotal = () => {
-    if (!selectedProduct) return 0;
-    return currentSellingPrice * quantity;
-  };
-
-  const handleSelectProduct = (product: Product) => {
-    setSelectedProduct(product);
-    setQuantity(1);
-    setSelectedVariantId(product.variants && product.variants.length > 0 ? product.variants[0].id : '');
-    setStockErrorState({ show: false, required: 0, available: 0 });
-  };
-
-  const handleAttemptComplete = () => {
-    if (!selectedProduct) return;
-
-    // Step 32: Stock Error Detection
-    if (quantity > currentAvailableStock) {
-      setStockErrorState({
-        show: true,
-        required: quantity,
-        available: currentAvailableStock,
-      });
-      return;
-    }
-
-    const totalAmount = calculateTotal();
-
-    // Split Payment Validation
-    if (paymentMethod === 'Split') {
-      const allocated = (splitAmounts.Cash || 0) + (splitAmounts['Mobile Money'] || 0) + (splitAmounts.Bank || 0);
-      if (allocated !== totalAmount) {
-        setSplitAllocationError(
-          `Allocated ${formatCurrency(allocated, currency)} does not match total ${formatCurrency(totalAmount, currency)}. Remaining: ${formatCurrency(totalAmount - allocated, currency)}`
-        );
-        return;
-      }
-    }
-
-    setSplitAllocationError(null);
-    finalizeSale(0);
-  };
-
-  const finalizeSale = (restockAmount = 0) => {
-    if (!selectedProduct) return;
-
-    let custId = selectedCustomerId;
-    let custName = customers.find((c) => c.id === selectedCustomerId)?.name;
-
-    if (paymentMethod === 'Credit') {
-      if (!custId && newCustomerName.trim()) {
-        custId = onAddCustomer(newCustomerName.trim());
-        custName = newCustomerName.trim();
-      }
-    }
-
-    const totalAmount = calculateTotal();
-    const unitCost = selectedProduct.buyingPrice || selectedProduct.costPrice || 0;
-    const totalCost = unitCost * quantity;
-    const profit = totalAmount - totalCost;
-    const displayName = activeVariant 
-      ? `${selectedProduct.name} (${activeVariant.name})` 
-      : selectedProduct.name;
-
-    // Generate Payment Splits
-    let paymentSplits: PaymentSplit[] | undefined = undefined;
-    if (paymentMethod === 'Split') {
-      paymentSplits = [
-        { method: 'Cash' as const, amount: splitAmounts.Cash || 0 },
-        { method: 'Mobile Money' as const, amount: splitAmounts['Mobile Money'] || 0 },
-        { method: 'Bank' as const, amount: splitAmounts.Bank || 0 },
-      ].filter((s) => s.amount > 0);
-    } else if (paymentMethod === 'Cash' || paymentMethod === 'Mobile Money' || paymentMethod === 'Bank') {
-      paymentSplits = [
-        { method: paymentMethod, amount: totalAmount }
-      ];
-    }
-
-    const newSale: Sale = {
-      id: `sale_${Date.now()}`,
-      invoiceNumber: `INV-${Math.floor(1000 + Math.random() * 9000)}`,
-      items: [
-        {
-          productId: selectedProduct.id,
-          productName: displayName,
-          quantity,
-          sellingPrice: currentSellingPrice,
-          buyingPrice: unitCost,
-          total: totalAmount,
-        },
-      ],
-      totalAmount,
-      totalCost,
-      profit,
-      paymentMethod,
-      paymentSplits,
-      paymentStatus: paymentMethod === 'Credit' ? 'UNPAID' : 'PAID',
-      customerId: paymentMethod === 'Credit' ? custId : undefined,
-      customerName: paymentMethod === 'Credit' ? custName : undefined,
-      date: new Date().toISOString(),
-    };
-
-    onCompleteSale(newSale, restockAmount);
-    setCompletedSale(newSale);
-  };
-
-  const handleCloseAll = () => {
-    setSelectedProduct(null);
-    setSelectedVariantId('');
-    setQuantity(1);
-    setSearchTerm('');
-    setCompletedSale(null);
-    setStockErrorState({ show: false, required: 0, available: 0 });
-    onClose();
-  };
-
   return (
-    <div 
-      id="smartledger-sell-modal"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm animate-fade-in"
-    >
-      <div className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]">
-        {/* Header */}
-        <div className="bg-slate-900 px-6 py-4 text-white flex items-center justify-between flex-shrink-0">
-          <div>
-            <h3 className="text-lg font-bold font-['Outfit',sans-serif]">
-              {completedSale ? '✅ Sale Completed' : '🛒 Sell Product'}
-            </h3>
-            <p className="text-xs text-slate-400">
-              {completedSale ? 'Invoice generated & stock updated' : 'Record sale and collect payment'}
-            </p>
-          </div>
-          <button
-            id="sell-modal-close-btn"
-            onClick={handleCloseAll}
-            className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Modal Body */}
-        <div className="p-5 sm:p-6 overflow-y-auto space-y-5">
-          {/* SCREEN: SALE COMPLETED & INVOICE (Step 20 & 21) */}
-          {completedSale ? (
-            <div className="space-y-5 animate-fade-in text-slate-800" id="sale-complete-invoice-view">
-              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-center space-y-1">
-                <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto" />
-                <h4 className="text-lg font-bold text-emerald-950">Sale Complete!</h4>
-                <p className="text-xs text-emerald-700">
-                  Stock reduced &bull; Profit added &bull; Cash/Ledger updated
+    <>
+      <div 
+        id="smartledger-sell-modal"
+        className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm animate-fade-in"
+      >
+        <div className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh]">
+          {/* Header */}
+          <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-400">
+                <ShoppingBag className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold font-['Outfit',sans-serif]">
+                  {completedSale ? 'Sale Completed' : 'Point of Sale • Ring-up'}
+                </h3>
+                <p className="text-xs text-slate-400">
+                  {completedSale
+                    ? `Invoice #${completedSale.invoiceNumber}`
+                    : 'Scan barcodes or select items to ring up'}
                 </p>
               </div>
+            </div>
+            <button
+              onClick={handleCloseAll}
+              className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
 
-              {/* Step 21 Automatic Invoice Sheet */}
-              <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-xs space-y-3">
-                <div className="flex justify-between items-center border-b pb-2">
-                  <span className="font-bold text-slate-900">INVOICE #{completedSale.invoiceNumber}</span>
-                  <span className="text-slate-500">{new Date(completedSale.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          {/* Body */}
+          <div className="p-4 sm:p-6 overflow-y-auto space-y-5">
+            {/* Scan Toast Feedback */}
+            {scanToast && (
+              <div className="p-2.5 bg-emerald-600 text-white rounded-xl text-xs font-bold flex items-center justify-between animate-fade-in shadow-md">
+                <span className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                  <span>{scanToast}</span>
+                </span>
+                <span className="text-[10px] text-emerald-200 font-mono">BEEP</span>
+              </div>
+            )}
+
+            {/* COMPLETED SALE CONFIRMATION VIEW */}
+            {completedSale ? (
+              <div className="space-y-5 text-center py-2 animate-fade-in">
+                <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto text-2xl font-bold">
+                  ✓
+                </div>
+                <div>
+                  <h4 className="text-xl font-bold text-slate-900 font-['Outfit',sans-serif]">
+                    Sale Recorded Successfully!
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Invoice #{completedSale.invoiceNumber} &bull; Inventory stock updated
+                  </p>
                 </div>
 
-                <div className="space-y-1.5 py-1">
+                {/* Receipt Details Box */}
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-left space-y-3 font-mono text-xs">
+                  <div className="flex justify-between font-bold text-slate-900 border-b pb-2">
+                    <span>Item</span>
+                    <span>Total</span>
+                  </div>
                   {completedSale.items.map((it, idx) => (
-                    <div key={idx} className="flex justify-between items-center">
-                      <span className="font-sans font-medium text-slate-700">
-                        {it.productName} &times; {it.quantity}
-                      </span>
-                      <span className="font-bold text-slate-900">
-                        {formatCurrency(it.total, currency)}
-                      </span>
+                    <div key={idx} className="flex justify-between text-slate-700">
+                      <span>{it.quantity}x {it.productName}</span>
+                      <span>{formatCurrency(it.total || 0, currency)}</span>
                     </div>
                   ))}
-                </div>
-
-                <div className="border-t pt-2 flex justify-between items-center text-sm font-bold">
-                  <span>TOTAL</span>
-                  <span className="text-emerald-700">{formatCurrency(completedSale.totalAmount, currency)}</span>
-                </div>
-
-                <div className="flex justify-between items-center text-[11px] text-slate-500 pt-1">
-                  <span>Payment Method:</span>
-                  <span className="font-bold text-slate-700">
-                    {completedSale.paymentMethod === 'Split' ? 'Split Payment' : completedSale.paymentMethod} &mdash; {completedSale.paymentStatus}
-                  </span>
-                </div>
-
-                {completedSale.paymentSplits && completedSale.paymentSplits.length > 1 && (
-                  <div className="p-2 rounded-lg bg-white border border-slate-200 text-[11px] space-y-1">
-                    <span className="font-bold text-slate-700 block">Payment Breakdown:</span>
-                    {completedSale.paymentSplits.map((split, i) => (
-                      <div key={i} className="flex justify-between items-center text-slate-600">
-                        <span>• {split.method}:</span>
-                        <span className="font-bold text-slate-800">{formatCurrency(split.amount, currency)}</span>
-                      </div>
-                    ))}
+                  <div className="border-t pt-2 flex justify-between font-bold text-sm text-slate-900">
+                    <span>Grand Total:</span>
+                    <span className="text-emerald-700">{formatCurrency(completedSale.totalAmount, currency)}</span>
                   </div>
-                )}
-
-                {completedSale.customerName && (
-                  <div className="flex justify-between items-center text-[11px] text-amber-700 pt-1">
-                    <span>Customer Debt:</span>
-                    <span className="font-bold">{completedSale.customerName}</span>
+                  <div className="text-[11px] text-slate-500 flex justify-between">
+                    <span>Payment Method:</span>
+                    <span className="font-semibold">{completedSale.paymentMethod}</span>
                   </div>
-                )}
-              </div>
+                </div>
 
-              {/* Invoice Actions */}
-              <div className="space-y-2">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {/* WhatsApp Instant Send */}
+                {/* Actions */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
                   <button
-                    id="invoice-whatsapp-btn"
                     onClick={handleQuickWhatsApp}
-                    className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                    className="py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer shadow-sm"
                   >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Send via WhatsApp</span>
+                    <Share2 className="w-4 h-4" />
+                    <span>Send WhatsApp Receipt</span>
                   </button>
-
-                  {/* 58mm / 80mm Thermal Receipt Preview */}
                   <button
-                    id="invoice-receipt-preview-btn"
-                    onClick={() => setIsReceiptModalOpen(true)}
-                    className="py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+                    onClick={handleCopyReceipt}
+                    className="py-3 px-4 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer"
                   >
-                    <FileText className="w-3.5 h-3.5 text-indigo-600" />
-                    <span>58/80mm Thermal Receipt</span>
+                    <Copy className="w-4 h-4 text-slate-500" />
+                    <span>{copiedToast ? 'Copied to Clipboard!' : 'Copy Text Receipt'}</span>
                   </button>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="pt-2">
                   <button
-                    id="invoice-print-btn"
-                    onClick={() => window.print()}
-                    className="flex-1 py-2 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                    onClick={() => {
+                      setCompletedSale(null);
+                      setCart([]);
+                    }}
+                    className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl cursor-pointer"
                   >
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>Print Direct</span>
-                  </button>
-                  <button
-                    id="invoice-share-btn"
-                    onClick={handleCopyReceipt}
-                    className="flex-1 py-2 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    {copiedToast ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Share2 className="w-3.5 h-3.5" />}
-                    <span>{copiedToast ? 'Copied!' : 'Copy Summary'}</span>
+                    Start New Sale
                   </button>
                 </div>
               </div>
+            ) : (
+              /* ACTIVE POS SALE VIEW */
+              <div className="space-y-4">
+                {/* PROMINENT SCAN BARCODE ACTION (Requirement 3 & 4) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    id="btn-pos-scan-barcode"
+                    type="button"
+                    onClick={() => setIsScannerOpen(true)}
+                    className="py-3.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-sm rounded-2xl flex items-center justify-center gap-2.5 shadow-md shadow-emerald-600/20 active:scale-[0.99] transition-all cursor-pointer"
+                  >
+                    <Camera className="w-5 h-5" />
+                    <span>📷 Scan Barcode</span>
+                  </button>
 
-              <button
-                id="invoice-new-sale-btn"
-                onClick={() => {
-                  setCompletedSale(null);
-                  setSelectedProduct(null);
-                  setQuantity(1);
-                }}
-                className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm tracking-wide transition-all cursor-pointer"
-              >
-                Start Another Sale
-              </button>
-            </div>
-          ) : (
-            <>
-              {/* STEP 32: STOCK DEFICIT ERROR PROMPT */}
-              {stockErrorState.show && selectedProduct && (
-                <div 
-                  id="stock-error-detection-box"
-                  className="p-4 bg-amber-50 border-2 border-amber-300 rounded-xl space-y-3 animate-fade-in text-amber-900"
-                >
-                  <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <h4 className="text-sm font-bold text-amber-900">
-                        ⚠️ Stock Alert: Insufficient Quantity
-                      </h4>
-                      <p className="text-xs text-amber-800 mt-1 leading-relaxed">
-                        You currently have only <strong>{stockErrorState.available}</strong> {selectedProduct.name}.
-                        <br />
-                        Did you produce or receive more {selectedProduct.name} today?
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row gap-2 pt-1">
-                    <button
-                      id="stock-err-add-production"
-                      onClick={() => {
-                        const neededExtra = quantity - stockErrorState.available;
-                        finalizeSale(neededExtra);
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                    <input
+                      id="pos-search-input"
+                      type="text"
+                      placeholder="Search name or type barcode..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && searchTerm.trim()) {
+                          handleProcessBarcode(searchTerm.trim());
+                        }
                       }}
-                      className="flex-1 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors cursor-pointer"
-                    >
-                      Yes, add production & sell
-                    </button>
-                    <button
-                      id="stock-err-change-quantity"
-                      onClick={() => {
-                        setQuantity(stockErrorState.available);
-                        setStockErrorState({ show: false, required: 0, available: 0 });
-                      }}
-                      className="flex-1 py-2 px-3 rounded-lg bg-amber-200 hover:bg-amber-300 text-amber-900 text-xs font-bold transition-colors cursor-pointer"
-                    >
-                      No, change quantity to {stockErrorState.available}
-                    </button>
+                      className="w-full pl-10 pr-4 py-3 rounded-2xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-xs text-slate-900 bg-slate-50/50"
+                    />
                   </div>
                 </div>
-              )}
 
-              {/* STEP 18: CHOOSE WHAT YOU ARE SELLING */}
-              {!selectedProduct ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-600">
-                      What are you selling?
-                    </label>
-                    <span className="text-[11px] text-slate-400">
-                      {products.length} products
-                    </span>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
-                      <input
-                        id="sell-search-input"
-                        type="text"
-                        placeholder="Search or scan product..."
-                        value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
-                        autoFocus
-                      />
+                {/* INSUFFICIENT STOCK WARNING (Requirement 7) */}
+                {stockAlert && (
+                  <div className="p-3.5 bg-rose-50 border-2 border-rose-300 rounded-2xl text-rose-900 text-xs space-y-1 animate-fade-in">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span className="font-bold text-sm">Insufficient Stock</span>
                     </div>
-                    <button
-                      id="sell-open-barcode-btn"
-                      type="button"
-                      onClick={() => setIsScannerOpen(true)}
-                      className="px-3 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 rounded-xl flex items-center gap-1.5 font-bold text-xs transition-all shadow-sm cursor-pointer whitespace-nowrap"
-                      title="Scan barcode with camera or enter SKU"
-                    >
-                      <Barcode className="w-4 h-4 text-emerald-600" />
-                      <span>Scan Code</span>
-                    </button>
+                    <p className="text-[11px] text-rose-800 pl-6">
+                      Only <strong>{stockAlert.available}</strong> {stockAlert.productName} units are available in inventory.
+                    </p>
                   </div>
+                )}
 
-                  <div className="max-h-64 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
-                    {filteredProducts.length === 0 ? (
-                      <div className="p-6 text-center text-slate-400 text-xs">
-                        No products found matching "{searchTerm}".
+                {/* UNKNOWN BARCODE PROMPT (Requirement 11) */}
+                {unknownBarcodePrompt && (
+                  <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl text-amber-900 text-xs space-y-2 animate-fade-in">
+                    <div className="flex items-start gap-2.5">
+                      <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                      <div>
+                        <h4 className="font-bold text-sm text-amber-950">Product Not Found</h4>
+                        <p className="text-[11px] text-amber-800 mt-0.5">
+                          SmartLedger couldn't find a product with barcode: <strong className="font-mono bg-amber-200/70 px-1.5 py-0.5 rounded">{unknownBarcodePrompt}</strong>
+                        </p>
                       </div>
-                    ) : (
-                      filteredProducts.map((p) => (
+                    </div>
+                    <div className="flex gap-2 pt-1 pl-7">
+                      {onAddNewProductWithBarcode && (
                         <button
-                          key={p.id}
                           type="button"
-                          id={`select-product-${p.id}`}
-                          onClick={() => handleSelectProduct(p)}
-                          className="w-full p-3.5 flex items-center justify-between text-left hover:bg-slate-50 transition-colors cursor-pointer"
+                          onClick={() => {
+                            const code = unknownBarcodePrompt;
+                            setUnknownBarcodePrompt(null);
+                            onAddNewProductWithBarcode(code);
+                          }}
+                          className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 shadow-sm cursor-pointer"
                         >
-                          <div>
-                            <p className="text-sm font-bold text-slate-900">{p.name}</p>
-                            <p className="text-xs text-slate-500">
-                              Stock: <span className={p.stock <= p.minStockLevel ? 'text-amber-600 font-bold' : 'text-slate-700'}>{p.stock}</span> {p.unit || 'units'}
-                            </p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm font-extrabold text-emerald-600">
-                              {formatCurrency(p.sellingPrice, currency)}
-                            </p>
-                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                              p.stock <= p.minStockLevel ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
-                            }`}>
-                              {p.stock <= p.minStockLevel ? 'Low Stock' : 'In Stock'}
-                            </span>
-                          </div>
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add New Product</span>
                         </button>
-                      ))
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUnknownBarcodePrompt(null);
+                          setIsScannerOpen(true);
+                        }}
+                        className="px-3.5 py-2 bg-white border border-amber-300 text-amber-900 font-bold text-xs rounded-xl hover:bg-amber-100 cursor-pointer"
+                      >
+                        Scan Again
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* CURRENT SALE CART ITEMS (Requirement 4 & 5) */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-500 font-semibold px-1">
+                    <span>Cart Items ({totalItemUnits} units)</span>
+                    {cart.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setCart([])}
+                        className="text-slate-400 hover:text-rose-600 text-[11px]"
+                      >
+                        Clear Cart
+                      </button>
                     )}
                   </div>
-                </div>
-              ) : (
-                /* SELECTED PRODUCT QUANTITY & CALCULATION */
-                <div className="space-y-4">
-                  <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <p className="text-xs text-slate-500">Selected Product</p>
-                      <h4 className="text-base font-bold text-slate-900">{selectedProduct.name}</h4>
-                      <p className="text-xs text-slate-600">
-                        In stock: <strong>{currentAvailableStock}</strong> &bull; Unit: {formatCurrency(currentSellingPrice, currency)}
+
+                  {cart.length === 0 ? (
+                    <div className="py-8 px-4 rounded-2xl bg-slate-50 border-2 border-dashed border-slate-200 text-center space-y-2">
+                      <Barcode className="w-8 h-8 text-slate-300 mx-auto" />
+                      <p className="text-xs font-bold text-slate-600">Cart is empty</p>
+                      <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
+                        Tap "Scan Barcode" above to scan bottles/packages, or choose a product from the list below.
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedProduct(null)}
-                      className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 underline"
-                    >
-                      Change
-                    </button>
-                  </div>
+                  ) : (
+                    <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                      {cart.map((item) => {
+                        const available = item.variantId
+                          ? (item.product.variants?.find((v) => v.id === item.variantId)?.stock ?? item.product.stock)
+                          : item.product.stock;
 
-                  {/* Product Variant Choice if available */}
-                  {selectedProduct.variants && selectedProduct.variants.length > 0 && (
-                    <div>
-                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5">
-                        Select Variant / Size / Pack
-                      </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        {selectedProduct.variants.map((v) => (
-                          <button
-                            key={v.id}
-                            type="button"
-                            onClick={() => setSelectedVariantId(v.id)}
-                            className={`p-2.5 rounded-xl border text-xs font-bold transition-all text-left cursor-pointer ${
-                              selectedVariantId === v.id
-                                ? 'bg-emerald-50 border-emerald-500 text-emerald-900 shadow-sm ring-1 ring-emerald-500'
-                                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                            }`}
+                        return (
+                          <div
+                            key={item.id}
+                            className="p-3 bg-white rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between gap-3 hover:border-slate-300 transition-all"
                           >
-                            <span className="block font-bold">{v.name}</span>
-                            <span className="text-[11px] text-emerald-700 font-extrabold">{formatCurrency(v.sellingPrice, currency)}</span>
-                            <span className="text-[10px] text-slate-400 block">{v.stock} in stock</span>
-                          </button>
-                        ))}
-                      </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <h4 className="text-xs font-bold text-slate-900 truncate">
+                                  {item.product.name}
+                                </h4>
+                                {item.variantName && (
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-bold">
+                                    {item.variantName}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
+                                <span>{formatCurrency(item.unitPrice, currency)} / unit</span>
+                                <span>&bull;</span>
+                                <span className={available < 5 ? 'text-amber-600 font-bold' : 'text-slate-500'}>
+                                  Stock: {available}
+                                </span>
+                                {item.product.barcode && (
+                                  <>
+                                    <span>&bull;</span>
+                                    <span className="font-mono text-[10px] text-slate-400">
+                                      {item.product.barcode}
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* QUANTITY CONTROLS (Requirement 5) */}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateItemQuantity(item.id, item.quantity - 1)}
+                                className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs cursor-pointer"
+                              >
+                                <Minus className="w-3.5 h-3.5" />
+                              </button>
+
+                              <input
+                                type="number"
+                                min="1"
+                                max={available}
+                                value={item.quantity}
+                                onChange={(e) => handleUpdateItemQuantity(item.id, parseInt(e.target.value) || 1)}
+                                className="w-12 py-1 text-center font-extrabold text-xs rounded-lg border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                              />
+
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateItemQuantity(item.id, item.quantity + 1)}
+                                className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs cursor-pointer"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+
+                            {/* Item Subtotal & Remove */}
+                            <div className="text-right shrink-0 min-w-[70px]">
+                              <p className="text-xs font-extrabold text-emerald-700">
+                                {formatCurrency(item.unitPrice * item.quantity, currency)}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveItem(item.id)}
+                                className="text-[10px] text-slate-400 hover:text-rose-600 mt-0.5 cursor-pointer"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
+                </div>
 
-                  {/* Quantity Selector */}
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-2">
-                      Choose Quantity
-                    </label>
-                    <div className="flex items-center justify-center gap-4 py-2">
-                      <button
-                        type="button"
-                        id="qty-minus-btn"
-                        onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                        className="w-10 h-10 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 flex items-center justify-center text-slate-700 font-bold cursor-pointer"
-                      >
-                        <Minus className="w-4 h-4" />
-                      </button>
+                {/* PRODUCT QUICK SELECTOR LIST (if searching or looking up) */}
+                {searchTerm && (
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      Catalog Matches ({filteredProducts.length})
+                    </p>
+                    <div className="max-h-40 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-2xl bg-white shadow-xs">
+                      {filteredProducts.length === 0 ? (
+                        <div className="p-4 text-center text-slate-400 text-xs">
+                          No matching products found.
+                        </div>
+                      ) : (
+                        filteredProducts.map((p) => (
+                          <div
+                            key={p.id}
+                            className="p-2.5 flex items-center justify-between hover:bg-slate-50 text-xs"
+                          >
+                            <div>
+                              <p className="font-bold text-slate-900">{p.name}</p>
+                              <p className="text-[10px] text-slate-500">
+                                In stock: {p.stock} &bull; Price: {formatCurrency(p.sellingPrice, currency)}
+                                {p.barcode && <span className="font-mono text-slate-400 ml-1">[{p.barcode}]</span>}
+                              </p>
+                            </div>
 
-                      <div className="text-center min-w-[70px]">
-                        <input
-                          id="sell-quantity-input"
-                          type="number"
-                          min="1"
-                          value={quantity}
-                          onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value) || 1))}
-                          className="text-2xl font-extrabold text-slate-900 text-center w-20 border-b-2 border-emerald-500 focus:outline-none"
-                        />
-                      </div>
-
-                      <button
-                        type="button"
-                        id="qty-plus-btn"
-                        onClick={() => setQuantity((q) => q + 1)}
-                        className="w-10 h-10 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 flex items-center justify-center text-slate-700 font-bold cursor-pointer"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleProductScanned(p);
+                                setSearchTerm('');
+                              }}
+                              className="px-3 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs cursor-pointer"
+                            >
+                              + Add
+                            </button>
+                          </div>
+                        ))
+                      )}
                     </div>
                   </div>
+                )}
 
-                  {/* Smart Calculation Card */}
-                  <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-emerald-950">
+                {/* TOTAL SUMMARY CARD */}
+                {cart.length > 0 && (
+                  <div className="p-4 bg-emerald-50/80 border border-emerald-200 rounded-2xl flex items-center justify-between text-emerald-950">
                     <div>
-                      <p className="text-xs font-medium text-emerald-700">Total Calculation</p>
+                      <p className="text-xs font-semibold text-emerald-700">Total Sale Amount</p>
                       <p className="text-xs text-slate-600">
-                        {quantity} &times; {formatCurrency(selectedProduct.sellingPrice, currency)}
+                        {totalItemUnits} items in cart &bull; Est. Profit: {formatCurrency(totalProfit, currency)}
                       </p>
                     </div>
                     <div className="text-right">
-                      <p className="text-xl font-extrabold text-emerald-800">
-                        {formatCurrency(calculateTotal(), currency)}
-                      </p>
-                      <p className="text-[10px] text-emerald-600">
-                        Est. Profit: {formatCurrency((selectedProduct.sellingPrice - selectedProduct.buyingPrice) * quantity, currency)}
+                      <p className="text-2xl font-extrabold text-emerald-800 font-['Outfit',sans-serif]">
+                        {formatCurrency(totalAmount, currency)}
                       </p>
                     </div>
                   </div>
+                )}
 
-                  {/* STEP 19: CHOOSE PAYMENT METHOD */}
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-2">
-                      How did the customer pay?
+                {/* PAYMENT METHOD SELECTOR */}
+                {cart.length > 0 && (
+                  <div className="space-y-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-600">
+                      Payment Method
                     </label>
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       {[
                         { method: 'Cash' as PaymentMethod, icon: '💵', label: 'Cash' },
                         { method: 'Mobile Money' as PaymentMethod, icon: '📱', label: 'Mobile Money' },
                         { method: 'Bank' as PaymentMethod, icon: '🏦', label: 'Bank' },
-                        { method: 'Split' as PaymentMethod, icon: '🔀', label: 'Split / Partial' },
                         ...(allowCustomerCredit ? [{ method: 'Credit' as PaymentMethod, icon: '📝', label: 'Credit (Pay Later)' }] : []),
                       ].map((pm) => (
                         <button
                           key={pm.method}
                           type="button"
-                          id={`pay-method-${pm.method.toLowerCase().replace(/[^a-z]/g, '')}`}
-                          onClick={() => {
-                            setPaymentMethod(pm.method);
-                            setSplitAllocationError(null);
-                            if (pm.method === 'Split') {
-                              // If uninitialized, default Cash to the current total
-                              if (!splitAmounts.Cash && !splitAmounts['Mobile Money'] && !splitAmounts.Bank) {
-                                setSplitAmounts({
-                                  Cash: calculateTotal(),
-                                  'Mobile Money': 0,
-                                  Bank: 0,
-                                });
-                              }
-                            }
-                          }}
-                          className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                          onClick={() => setPaymentMethod(pm.method)}
+                          className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
                             paymentMethod === pm.method
-                              ? 'border-emerald-600 bg-emerald-50 text-emerald-900 font-bold shadow-sm'
-                              : 'border-slate-200 hover:bg-slate-50 text-slate-700 font-medium'
+                              ? 'border-emerald-600 bg-emerald-50 text-emerald-900 font-bold shadow-xs'
+                              : 'border-slate-200 hover:bg-slate-50 text-slate-700 text-xs'
                           }`}
                         >
-                          <span className="text-xl block mb-0.5">{pm.icon}</span>
-                          <span className="text-xs">{pm.label}</span>
+                          <span className="text-lg block mb-0.5">{pm.icon}</span>
+                          <span className="text-xs font-bold">{pm.label}</span>
                         </button>
                       ))}
                     </div>
-                  </div>
 
-                  {/* Split / Partial Payment Breakdown Inputs */}
-                  {paymentMethod === 'Split' && (
-                    <div className="p-4 bg-slate-50 border border-slate-300 rounded-xl space-y-3 animate-fade-in">
-                      <div className="flex items-center justify-between pb-1 border-b border-slate-200">
-                        <label className="block text-xs font-bold text-slate-900 uppercase tracking-wide">
-                          Split Payment Allocation
-                        </label>
-                        <span className="text-xs text-slate-600">
-                          Total Due: <strong className="text-slate-900">{formatCurrency(calculateTotal(), currency)}</strong>
-                        </span>
-                      </div>
-
-                      {/* Cash Split Input */}
-                      <div className="flex items-center gap-2">
-                        <span className="w-28 text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                          <span>💵</span> Cash
-                        </span>
-                        <input
-                          id="split-input-cash"
-                          type="number"
-                          min="0"
-                          value={splitAmounts.Cash || ''}
-                          onChange={(e) => {
-                            const val = Math.max(0, parseFloat(e.target.value) || 0);
-                            setSplitAmounts((prev) => ({ ...prev, Cash: val }));
-                            setSplitAllocationError(null);
-                          }}
-                          placeholder="0"
-                          className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-extrabold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                        />
-                        <button
-                          type="button"
-                          id="split-balance-cash-btn"
-                          onClick={() => {
-                            const total = calculateTotal();
-                            const others = (splitAmounts['Mobile Money'] || 0) + (splitAmounts.Bank || 0);
-                            setSplitAmounts((prev) => ({ ...prev, Cash: Math.max(0, total - others) }));
-                            setSplitAllocationError(null);
-                          }}
-                          className="text-[11px] px-2.5 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg font-bold transition-colors cursor-pointer"
+                    {/* Credit Customer Selector if Credit */}
+                    {paymentMethod === 'Credit' && (
+                      <div className="p-3 bg-amber-50/60 rounded-xl border border-amber-200 text-xs space-y-2">
+                        <label className="font-bold text-amber-900 block">Select Customer for Credit:</label>
+                        <select
+                          value={selectedCustomerId}
+                          onChange={(e) => setSelectedCustomerId(e.target.value)}
+                          className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
                         >
-                          Balance
-                        </button>
-                      </div>
-
-                      {/* Mobile Money Split Input */}
-                      <div className="flex items-center gap-2">
-                        <span className="w-28 text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                          <span>📱</span> Mobile Money
-                        </span>
-                        <input
-                          id="split-input-momo"
-                          type="number"
-                          min="0"
-                          value={splitAmounts['Mobile Money'] || ''}
-                          onChange={(e) => {
-                            const val = Math.max(0, parseFloat(e.target.value) || 0);
-                            setSplitAmounts((prev) => ({ ...prev, 'Mobile Money': val }));
-                            setSplitAllocationError(null);
-                          }}
-                          placeholder="0"
-                          className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-extrabold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                        />
-                        <button
-                          type="button"
-                          id="split-balance-momo-btn"
-                          onClick={() => {
-                            const total = calculateTotal();
-                            const others = (splitAmounts.Cash || 0) + (splitAmounts.Bank || 0);
-                            setSplitAmounts((prev) => ({ ...prev, 'Mobile Money': Math.max(0, total - others) }));
-                            setSplitAllocationError(null);
-                          }}
-                          className="text-[11px] px-2.5 py-2 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg font-bold transition-colors cursor-pointer"
-                        >
-                          Balance
-                        </button>
-                      </div>
-
-                      {/* Bank Split Input */}
-                      <div className="flex items-center gap-2">
-                        <span className="w-28 text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                          <span>🏦</span> Bank
-                        </span>
-                        <input
-                          id="split-input-bank"
-                          type="number"
-                          min="0"
-                          value={splitAmounts.Bank || ''}
-                          onChange={(e) => {
-                            const val = Math.max(0, parseFloat(e.target.value) || 0);
-                            setSplitAmounts((prev) => ({ ...prev, Bank: val }));
-                            setSplitAllocationError(null);
-                          }}
-                          placeholder="0"
-                          className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-extrabold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                        />
-                        <button
-                          type="button"
-                          id="split-balance-bank-btn"
-                          onClick={() => {
-                            const total = calculateTotal();
-                            const others = (splitAmounts.Cash || 0) + (splitAmounts['Mobile Money'] || 0);
-                            setSplitAmounts((prev) => ({ ...prev, Bank: Math.max(0, total - others) }));
-                            setSplitAllocationError(null);
-                          }}
-                          className="text-[11px] px-2.5 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg font-bold transition-colors cursor-pointer"
-                        >
-                          Balance
-                        </button>
-                      </div>
-
-                      {/* Split Validation Status Banner */}
-                      {(() => {
-                        const total = calculateTotal();
-                        const allocated = (splitAmounts.Cash || 0) + (splitAmounts['Mobile Money'] || 0) + (splitAmounts.Bank || 0);
-                        const diff = total - allocated;
-                        if (diff === 0) {
-                          return (
-                            <div className="p-2.5 rounded-lg bg-emerald-100 text-emerald-900 text-xs font-bold flex items-center justify-between">
-                              <span className="flex items-center gap-1.5">
-                                <span>✅</span>
-                                <span>Fully Allocated: {formatCurrency(allocated, currency)}</span>
-                              </span>
-                              <span>Ready</span>
-                            </div>
-                          );
-                        }
-                        return (
-                          <div className={`p-2.5 rounded-lg text-xs font-bold flex items-center justify-between ${
-                            diff > 0 ? 'bg-amber-100 text-amber-900' : 'bg-rose-100 text-rose-900'
-                          }`}>
-                            <span>Allocated: {formatCurrency(allocated, currency)} / {formatCurrency(total, currency)}</span>
-                            <span>{diff > 0 ? `Remaining: ${formatCurrency(diff, currency)}` : `Over by: ${formatCurrency(-diff, currency)}`}</span>
-                          </div>
-                        );
-                      })()}
-
-                      {splitAllocationError && (
-                        <p className="text-xs text-rose-600 font-bold">{splitAllocationError}</p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Customer Selection if Credit */}
-                  {paymentMethod === 'Credit' && (
-                    <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl space-y-2 animate-fade-in">
-                      <label className="block text-xs font-bold text-amber-900">
-                        Who is buying on credit?
-                      </label>
-                      <select
-                        id="credit-customer-select"
-                        value={selectedCustomerId}
-                        onChange={(e) => setSelectedCustomerId(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-amber-300 bg-white text-xs font-medium text-slate-800 focus:outline-none"
-                      >
-                        <option value="">-- Choose Existing Customer --</option>
-                        {customers.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name} (Current Debt: {formatCurrency(c.amountOwed, currency)})
-                          </option>
-                        ))}
-                      </select>
-
-                      {!selectedCustomerId && (
-                        <div>
-                          <p className="text-[11px] text-amber-700 mb-1">Or enter new customer name:</p>
+                          <option value="">-- Choose existing customer --</option>
+                          {customers.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name} {c.phone ? `(${c.phone})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        {!selectedCustomerId && (
                           <input
-                            id="new-credit-cust-name"
                             type="text"
-                            placeholder="e.g. John Bizimana"
+                            placeholder="Or enter new customer name..."
                             value={newCustomerName}
                             onChange={(e) => setNewCustomerName(e.target.value)}
-                            className="w-full px-3 py-2 rounded-lg border border-amber-300 bg-white text-xs text-slate-800 focus:outline-none"
+                            className="w-full p-2 rounded-lg border border-slate-300 bg-white text-xs"
                           />
-                        </div>
-                      )}
-                    </div>
-                  )}
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
-                  {/* Complete Sale CTA */}
+                {/* COMPLETE SALE BUTTON */}
+                {cart.length > 0 && (
                   <button
-                    id="complete-sale-btn"
                     type="button"
-                    onClick={handleAttemptComplete}
-                    className="w-full py-3.5 px-6 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-sm tracking-wide shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                    onClick={handleAttemptCheckout}
+                    className="w-full py-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
                   >
-                    <span>Complete Sale &mdash; {formatCurrency(calculateTotal(), currency)}</span>
-                    <ArrowRight className="w-4 h-4" />
+                    <span>Complete Sale • {formatCurrency(totalAmount, currency)}</span>
+                    <ArrowRight className="w-5 h-5" />
                   </button>
-                </div>
-              )}
-            </>
-          )}
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Barcode & QR Code Scanner Modal */}
+      {/* Embedded Barcode Scanner Camera Modal */}
       <BarcodeScannerModal
         isOpen={isScannerOpen}
         onClose={() => setIsScannerOpen(false)}
+        mode="sales"
         products={products}
         currency={currency}
-        onProductScanned={handleProductScanned}
+        cartCount={cart.length}
+        onProductScanned={(prod, variant) => {
+          handleProductScanned(prod, variant);
+        }}
+        onAddNewProductWithBarcode={(barcode) => {
+          setIsScannerOpen(false);
+          if (onAddNewProductWithBarcode) {
+            onAddNewProductWithBarcode(barcode);
+          }
+        }}
       />
-
-      {/* 58mm / 80mm Thermal Receipt & WhatsApp Modal */}
-      {completedSale && (
-        <ReceiptModal
-          isOpen={isReceiptModalOpen}
-          onClose={() => setIsReceiptModalOpen(false)}
-          sale={completedSale}
-          profile={profile || {
-            id: 'temp',
-            name: 'SmartLedger Store',
-            type: 'Bakery',
-            currency: currency,
-            allowCustomerCredit: allowCustomerCredit,
-            allowSupplierCredit: false,
-            ownerName: 'Owner',
-            ownerEmailOrPhone: '',
-            isBakeryMode: false,
-            beginnerMode: false,
-            createdAt: new Date().toISOString()
-          }}
-          currency={currency}
-          customers={customers}
-        />
-      )}
-    </div>
+    </>
   );
 };

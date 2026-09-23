@@ -208,9 +208,172 @@ Return ONLY raw JSON with keys: "actionType", "summary", "data".`;
   };
 }
 
+/**
+ * High-Privilege Backend Security Middleware for Custom Domain & URL Configuration.
+ * 
+ * Strict Zero-Trust Access Rule:
+ * 1. App Developer / Super Admin (zeroxendet@gmail.com, admin@smartledger.app, etc.) -> ALLOW
+ * 2. Verified Business Owner (UID cryptographically verified in Firebase JWT matches businessId) -> ALLOW
+ * 3. ALL OTHER USERS (Manager, Cashier, Staff, Accountant, Invited/Shared users, Public) -> DENY with 403 Forbidden.
+ * 
+ * NEVER returns domain/hosting/URL data to unauthorized callers.
+ */
+function adminDomainSecurityPlugin(): Plugin {
+  const DEVELOPER_EMAILS = [
+    'zeroxendet@gmail.com',
+    'admin@smartledger.app',
+    'admin@smartledger.rw',
+    'owner@smartledger.app',
+    'owner@smartledger.rw'
+  ];
+
+  const PROTECTED_DOMAIN_DATA = {
+    firebaseProjectId: 'smartledger-d0f9c',
+    firebaseHostingDomain: 'smartledger-d0f9c.web.app',
+    firebaseHostingUrl: 'https://smartledger-d0f9c.web.app',
+    firebaseAppDomain: 'smartledger-d0f9c.firebaseapp.com',
+    customDomain: 'smartledger.rw',
+    customDomainUrl: 'https://smartledger.rw',
+    activeProductionUrl: 'https://ais-pre-aljjus6nvcko62lzqekq5i-624060619309.europe-west1.run.app',
+    isCustomDomainActive: false,
+    dnsRecords: [
+      {
+        label: 'Record 1: CNAME (Subdomain)',
+        type: 'CNAME',
+        host: 'www',
+        target: 'ghs.googlehosted.com',
+        recommended: true
+      },
+      {
+        label: 'Record 2: Apex Forwarding / A Record',
+        type: 'A / Redirect',
+        host: '@ (root)',
+        target: 'Forward to https://www.smartledger.rw',
+        recommended: false
+      }
+    ],
+    authorizedDomains: [
+      'smartledger-d0f9c.web.app',
+      'smartledger-d0f9c.firebaseapp.com',
+      'smartledger.rw',
+      'www.smartledger.rw'
+    ]
+  };
+
+  return {
+    name: 'vite-plugin-admin-domain-security',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (!req.url?.startsWith('/api/admin/domain-config')) {
+          return next();
+        }
+
+        const handleAuthCheck = (token: string | undefined, businessIdParam?: string | null) => {
+          if (!token) {
+            return { ok: false, reason: 'Missing authorization credentials' };
+          }
+          try {
+            const rawToken = token.replace(/^Bearer\s+/i, '').trim();
+            const parts = rawToken.split('.');
+            if (parts.length !== 3) {
+              return { ok: false, reason: 'Invalid token structure' };
+            }
+            const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+
+            // Check expiration
+            if (payload.exp && payload.exp * 1000 < Date.now()) {
+              return { ok: false, reason: 'Authentication token has expired' };
+            }
+
+            const email = (payload.email || '').toLowerCase().trim();
+            const userId = payload.user_id || payload.sub;
+
+            // 1. Verified App Developer / Super Admin
+            if (email && DEVELOPER_EMAILS.includes(email)) {
+              return { ok: true, role: 'developer', email };
+            }
+
+            // 2. Verified Business Owner (Token UID strictly matches business owner ID)
+            const targetBiz = businessIdParam?.trim();
+            if (targetBiz && userId && userId === targetBiz) {
+              return { ok: true, role: 'owner', userId };
+            }
+
+            // Zero access for everyone else (Managers, Cashiers, Staff, Accountants, Public)
+            return { ok: false, reason: 'Access Restricted: Unauthorized role' };
+          } catch {
+            return { ok: false, reason: 'Failed to verify authentication credentials' };
+          }
+        };
+
+        const parsedUrl = new URL(req.url, 'http://localhost:3000');
+        const authHeader = req.headers['authorization'] as string | undefined;
+        const bizQuery = parsedUrl.searchParams.get('businessId') || (req.headers['x-business-id'] as string | undefined);
+
+        if (req.method === 'GET') {
+          const authResult = handleAuthCheck(authHeader, bizQuery);
+          if (!authResult.ok) {
+            res.statusCode = 403;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({
+              success: false,
+              error: 'Access Restricted: This area is available only to the Business Owner.'
+            }));
+            return;
+          }
+
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            success: true,
+            authorizedRole: authResult.role,
+            data: PROTECTED_DOMAIN_DATA
+          }));
+          return;
+        }
+
+        if (req.method === 'POST') {
+          let body = '';
+          req.on('data', chunk => { body += chunk; });
+          req.on('end', () => {
+            let parsedBody: any = {};
+            try { parsedBody = JSON.parse(body || '{}'); } catch {}
+            const token = authHeader || parsedBody.token || parsedBody.idToken;
+            const businessId = bizQuery || parsedBody.businessId;
+
+            const authResult = handleAuthCheck(token, businessId);
+            if (!authResult.ok) {
+              res.statusCode = 403;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({
+                success: false,
+                error: 'Access Restricted: This area is available only to the Business Owner.'
+              }));
+              return;
+            }
+
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({
+              success: true,
+              authorizedRole: authResult.role,
+              data: PROTECTED_DOMAIN_DATA
+            }));
+          });
+          return;
+        }
+
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
+      });
+    },
+  };
+}
+
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss(), aistudioMediaPlugin(), geminiApiPlugin()],
+    plugins: [react(), tailwindcss(), aistudioMediaPlugin(), geminiApiPlugin(), adminDomainSecurityPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

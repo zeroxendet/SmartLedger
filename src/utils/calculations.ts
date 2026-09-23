@@ -243,3 +243,54 @@ export function detectExpenseAnomaly(category: string, enteredAmount: number, ex
 
   return { isAnomaly: false, typicalAmount: Math.round(avg) };
 }
+
+export function generateWhatsAppReceiptText(
+  sale: Sale,
+  businessName: string,
+  currency: CurrencyCode = 'RWF',
+  businessPhone?: string
+): string {
+  const dateFormatted = new Date(sale.date).toLocaleDateString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  const lines = [
+    `🧾 *RECEIPT: ${businessName.toUpperCase()}*`,
+    `Invoice: #${sale.invoiceNumber || sale.id.slice(-6)}`,
+    `Date: ${dateFormatted}`,
+    `--------------------------------`,
+  ];
+
+  sale.items.forEach((item) => {
+    lines.push(
+      `${item.quantity}x ${item.productName} @ ${formatCurrency(item.sellingPrice, currency)} = ${formatCurrency(item.total, currency)}`
+    );
+  });
+
+  lines.push(`--------------------------------`);
+  lines.push(`*GRAND TOTAL: ${formatCurrency(sale.totalAmount, currency)}*`);
+  lines.push(`Payment: ${sale.paymentMethod}`);
+  if (sale.customerName) {
+    lines.push(`Customer: ${sale.customerName}`);
+  }
+  if (businessPhone) {
+    lines.push(`Tel: ${businessPhone}`);
+  }
+  lines.push(`Thank you for your business!`);
+
+  return lines.join('\n');
+}
+
+export function openWhatsAppReceipt(phoneNumber?: string, receiptText?: string): void {
+  if (!receiptText) return;
+  const encodedText = encodeURIComponent(receiptText);
+  const cleanPhone = phoneNumber ? phoneNumber.replace(/[^0-9]/g, '') : '';
+  const url = cleanPhone
+    ? `https://wa.me/${cleanPhone}?text=${encodedText}`
+    : `https://wa.me/?text=${encodedText}`;
+  window.open(url, '_blank');
+}

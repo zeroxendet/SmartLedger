@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Sale, CurrencyCode, BusinessProfile, Customer } from '../types';
 import { formatCurrency } from '../utils/calculations';
-import { generateWhatsAppReceiptText, openWhatsAppReceipt } from '../utils/receiptUtils';
+import { generateWhatsAppReceiptText, openWhatsAppReceipt, downloadReceiptFile } from '../utils/receiptUtils';
 import { 
   X, 
   Printer, 
@@ -10,7 +10,8 @@ import {
   Check, 
   Smartphone, 
   FileText,
-  Copy
+  Copy,
+  Download
 } from 'lucide-react';
 
 interface ReceiptModalProps {
@@ -122,6 +123,16 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                downloadReceiptFile(sale, receiptText);
+                showToast('Receipt downloaded successfully!');
+              }}
+              className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+            >
+              <Download className="w-3.5 h-3.5 text-slate-600" />
+              <span>Download</span>
+            </button>
             <button
               onClick={handlePrint}
               className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
@@ -238,6 +249,18 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
             {/* Total Section */}
             <div className="py-2.5 space-y-1.5 border-b border-dashed border-slate-400 text-xs">
+              {sale.subtotal && sale.discount && sale.discount > 0 && (
+                <>
+                  <div className="flex justify-between text-[11px] text-slate-600">
+                    <span>Subtotal:</span>
+                    <span>{formatCurrency(sale.subtotal, currency)}</span>
+                  </div>
+                  <div className="flex justify-between text-[11px] text-slate-600">
+                    <span>Discount:</span>
+                    <span>-{formatCurrency(sale.discount, currency)}</span>
+                  </div>
+                </>
+              )}
               <div className="flex justify-between font-bold text-sm text-slate-950">
                 <span>TOTAL:</span>
                 <span>{formatCurrency(sale.totalAmount, currency)}</span>
